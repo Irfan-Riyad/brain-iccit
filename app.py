@@ -28,34 +28,61 @@ if 'device' not in st.session_state:
     st.session_state.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ----------------------------
-# Model Loader with Multiple Architectures
+# Hybrid CNN Model Definition
+# ----------------------------
+class HybridCNN(nn.Module):
+    def __init__(self, num_classes, pretrained=False, freeze_backbones=False, hidden=1024, p=0.5):
+        super().__init__()
+        r_weights = models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
+        d_weights = models.DenseNet121_Weights.IMAGENET1K_V1 if pretrained else None
+
+        # --- Backbone A: ResNet50 ---
+        self.resnet = models.resnet50(weights=r_weights)
+        self.resnet.fc = nn.Identity()
+
+        # --- Backbone B: DenseNet121 ---
+        self.densenet = models.densenet121(weights=d_weights)
+        self.densenet.classifier = nn.Identity()
+
+        feat_dim = 2048 + 1024 # ResNet50 output + DenseNet121 output
+
+        if freeze_backbones:
+            for m in [self.resnet, self.densenet]:
+                for p_ in m.parameters():
+                    p_.requires_grad = False
+
+        # --- Fusion + Classifier Head ---
+        self.head = nn.Sequential(
+            nn.Linear(feat_dim, hidden),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p),
+            nn.Linear(hidden, num_classes)
+        )
+
+    def forward(self, x):
+        f1 = self.resnet(x)
+        f2 = self.densenet(x)
+        fused = torch.cat([f1, f2], dim=1)
+        return self.head(fused)
+
+# ----------------------------
+# Model Loader
 # ----------------------------
 @st.cache_resource
-def load_model(model_file, num_classes, architecture='resnet50'):
+def load_model(model_file, num_classes):
     """
-    Load PyTorch model with support for multiple architectures
+    Load HybridCNN model from checkpoint
     """
     device = st.session_state.device
     
-    # Create model based on architecture
-    if architecture == 'resnet50':
-        model = models.resnet50(weights=None)
-        model.fc = nn.Linear(model.fc.in_features, num_classes)
-    elif architecture == 'resnet34':
-        model = models.resnet34(weights=None)
-        model.fc = nn.Linear(model.fc.in_features, num_classes)
-    elif architecture == 'resnet18':
-        model = models.resnet18(weights=None)
-        model.fc = nn.Linear(model.fc.in_features, num_classes)
-    elif architecture == 'efficientnet_b0':
-        model = models.efficientnet_b0(weights=None)
-        model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
-    elif architecture == 'vgg16':
-        model = models.vgg16(weights=None)
-        model.classifier[6] = nn.Linear(model.classifier[6].in_features, num_classes)
-    else:
-        model = models.resnet50(weights=None)
-        model.fc = nn.Linear(model.fc.in_features, num_classes)
+    # Create HybridCNN model
+    model = HybridCNN(
+        num_classes=num_classes,
+        pretrained=False,
+        freeze_backbones=False,
+        hidden=1024,
+        p=0.5
+    )
     
     # Load checkpoint
     checkpoint = torch.load(model_file, map_location=device)
@@ -121,13 +148,6 @@ classes_file = st.sidebar.file_uploader(
     help="Upload a text file with one class name per line"
 )
 
-# Architecture selection
-architecture = st.sidebar.selectbox(
-    "Model Architecture",
-    ['resnet50', 'resnet34', 'resnet18', 'efficientnet_b0', 'vgg16'],
-    help="Select the architecture used for training"
-)
-
 # Image size
 img_size = st.sidebar.number_input(
     "Input Image Size",
@@ -138,13 +158,7 @@ img_size = st.sidebar.number_input(
     help="Image size used during training"
 )
 
-# Manual class input (fallback)
-st.sidebar.subheader("Or Enter Classes Manually")
-manual_classes = st.sidebar.text_area(
-    "Class Names (one per line)",
-    placeholder="glioma\nmeningioma\npituitary\nnotumor",
-    help="Alternative to uploading classes.txt"
-)
+
 
 # Load model button
 if st.sidebar.button("🔄 Load Model", type="primary"):
@@ -156,15 +170,13 @@ if st.sidebar.button("🔄 Load Model", type="primary"):
                 # Load class names
                 if classes_file is not None:
                     class_names = load_classes(classes_file)
-                elif manual_classes.strip():
-                    class_names = [c.strip() for c in manual_classes.split('\n') if c.strip()]
                 else:
-                    st.sidebar.error("Please provide class names via file or manual input!")
+                    st.sidebar.error("Please upload a classes.txt file!")
                     st.stop()
                 
                 # Load model
                 num_classes = len(class_names)
-                model = load_model(model_file, num_classes, architecture)
+                model = load_model(model_file, num_classes)
                 
                 # Save to session state
                 st.session_state.model = model
@@ -279,10 +291,8 @@ with st.expander("📖 How to Use This App"):
          pituitary
          notumor
          ```
-       - Or enter classes manually in the text area
     
     3. **Configure Settings**
-       - Select the correct model architecture
        - Set the input image size (default: 224)
     
     4. **Load Model**
@@ -295,7 +305,7 @@ with st.expander("📖 How to Use This App"):
        - View results with confidence scores
     
     ### Tips:
-    - Make sure the architecture matches your trained model
+    - The app uses HybridCNN (ResNet50 + DenseNet121)
     - Image size should match your training configuration
     - The app supports GPU if available (check sidebar)
     - Classes must match the order used during training
