@@ -317,14 +317,17 @@ if uploaded_image:
                     
                     st.divider()
                     st.subheader("🎯 Final Prediction")
-                    predicted_class = st.session_state.class_names[predicted_idx]
-                    st.success(f"**Predicted: {predicted_class}**")
-                    st.metric("Confidence", f"{confidence*100:.2f}%")
                     
-                    # Check if class order might be wrong
+                    # Always use checkpoint classes if available
                     if st.session_state.checkpoint_classes:
                         checkpoint_pred = st.session_state.checkpoint_classes[predicted_idx]
-                        st.info(f"If using checkpoint class order: **{checkpoint_pred}**")
+                        st.success(f"**Predicted: {checkpoint_pred}**")
+                        st.metric("Confidence", f"{confidence*100:.2f}%")
+                    else:
+                        predicted_class = st.session_state.class_names[predicted_idx]
+                        st.success(f"**Predicted: {predicted_class}**")
+                        st.metric("Confidence", f"{confidence*100:.2f}%")
+                        st.warning("⚠️ No checkpoint classes found - using uploaded classes.txt")
                     
                 except Exception as e:
                     st.error(f"Error: {e}")
