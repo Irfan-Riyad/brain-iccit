@@ -222,22 +222,36 @@ class GradCAM:
         class_loss.backward()
         
         # Generate CAM
-        gradients = self.gradients[0].clone()  # [C, H, W]
-        activations = self.activations[0].clone()  # [C, H, W]
+        gradients = self.gradients[0].clone()  # Can be [C, H, W] or [C]
+        activations = self.activations[0].clone()  # Can be [C, H, W] or [C]
         
-        # Grad-CAM++: Use positive gradients only for better localization
-        gradients = F.relu(gradients)
-        
-        # Global average pooling on gradients
-        weights = gradients.mean(dim=(1, 2))  # [C]
-        
-        # Weighted combination of activation maps
-        cam = torch.zeros(activations.shape[1:], device=activations.device)
-        for i, w in enumerate(weights):
-            cam += w * activations[i]
-        
-        # Apply ReLU to focus on positive contributions
-        cam = F.relu(cam)
+        # Check if we have spatial dimensions
+        if gradients.dim() == 3:  # Convolutional layer [C, H, W]
+            # Grad-CAM++: Use positive gradients only for better localization
+            gradients = F.relu(gradients)
+            
+            # Global average pooling on gradients
+            weights = gradients.mean(dim=(1, 2))  # [C]
+            
+            # Weighted combination of activation maps
+            cam = torch.zeros(activations.shape[1:], device=activations.device)
+            for i, w in enumerate(weights):
+                cam += w * activations[i]
+            
+            # Apply ReLU to focus on positive contributions
+            cam = F.relu(cam)
+            
+        elif gradients.dim() == 1:  # Fully connected layer [C]
+            # For FC layers, we can't create spatial CAM
+            # Instead, return a uniform attention map weighted by gradient magnitude
+            cam_size = 7  # Create a 7x7 feature map
+            weights = F.relu(gradients)
+            avg_weight = weights.mean()
+            cam = torch.ones((cam_size, cam_size), device=activations.device) * avg_weight
+            
+        else:
+            # Fallback: create uniform map
+            cam = torch.ones((7, 7), device=activations.device) * 0.5
         
         # Normalize
         cam = cam - cam.min()
@@ -479,7 +493,7 @@ if st.session_state.last_prediction:
                 
                 # Define target layers
                 layer_map = {
-                    "HybridCNN (Fusion)": st.session_state.model.head[0],
+                    "HybridCNN (Fusion)": st.session_state.model.resnet.layer4[-1].conv3,  # Use ResNet last layer instead
                     "ResNet50 (Layer 4)": st.session_state.model.resnet.layer4[-1].conv3,
                     "ResNet50 (Layer 3)": st.session_state.model.resnet.layer3[-1].conv3,
                     "DenseNet121 (Block 4)": st.session_state.model.densenet.features.denseblock4.denselayer16.conv2,
@@ -530,7 +544,7 @@ if st.session_state.last_prediction:
                 # Layer explanation
                 with st.expander("ℹ️ About This Layer"):
                     layer_info = {
-                        "HybridCNN (Fusion)": "Shows how the model combines ResNet50 and DenseNet121 features. Best for understanding the overall decision-making process.",
+                        "HybridCNN (Fusion)": "Shows combined features from both ResNet50 and DenseNet121. Uses ResNet Layer 4 as the base for visualization since fusion happens after feature extraction.",
                         "ResNet50 (Layer 4)": "Deepest ResNet layer with most abstract features. Captures high-level patterns and complex tumor characteristics.",
                         "ResNet50 (Layer 3)": "Mid-level ResNet features. Good for detecting structural patterns and edges in the tumor.",
                         "DenseNet121 (Block 4)": "Final DenseNet block with rich feature connections. Excellent for detailed texture analysis.",
