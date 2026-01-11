@@ -1,57 +1,60 @@
 import streamlit as st
+import pandas as pd
 import torch
 import torch.nn as nn
-import numpy as np
-import pandas as pd
-from torchvision import models, transforms
+import torch.nn.functional as F
+from torchvision import transforms, models
 from PIL import Image
+import io
+import time
+import numpy as np
+import cv2
+import matplotlib.pyplot as plt
 
-# =========================================================
-# Page Configuration
-# =========================================================
+# ----------------------------
+# Page Config
+# ----------------------------
 st.set_page_config(
-    page_title="Brain Tumor MRI Classifier",
+    page_title="Brain Tumor Classifier - Debug Mode", 
     page_icon="🧠",
-    layout="centered"
+    layout="wide"
 )
 
-st.title("🧠 Brain Tumor MRI Classifier")
-st.caption("HybridCNN (ResNet50 + DenseNet121)")
+st.title("🧠 HybridCNN Brain Tumor Classifier")
 
-# =========================================================
+# ----------------------------
 # Session State
-# =========================================================
-if "model" not in st.session_state:
+# ----------------------------
+if 'model' not in st.session_state:
     st.session_state.model = None
-if "class_names" not in st.session_state:
+if 'class_names' not in st.session_state:
     st.session_state.class_names = None
-if "checkpoint_classes" not in st.session_state:
-    st.session_state.checkpoint_classes = None
-if "debug_logs" not in st.session_state:
-    st.session_state.debug_logs = []
-if "device" not in st.session_state:
+if 'device' not in st.session_state:
     st.session_state.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if 'checkpoint_classes' not in st.session_state:
+    st.session_state.checkpoint_classes = None
 
-# =========================================================
-# Background Logger
-# =========================================================
-def log(msg):
-    st.session_state.debug_logs.append(str(msg))
-
-# =========================================================
-# HybridCNN Model (Exact Architecture)
-# =========================================================
+# ----------------------------
+# HybridCNN Model (Exact Match)
+# ----------------------------
 class HybridCNN(nn.Module):
-    def __init__(self, num_classes, hidden=1024, p=0.5):
+    def __init__(self, num_classes, pretrained=True, freeze_backbones=True, hidden=1024, p=0.5):
         super().__init__()
+        r_weights = models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
+        d_weights = models.DenseNet121_Weights.IMAGENET1K_V1 if pretrained else None
 
-        self.resnet = models.resnet50(weights=None)
+        self.resnet = models.resnet50(weights=r_weights)
         self.resnet.fc = nn.Identity()
 
-        self.densenet = models.densenet121(weights=None)
+        self.densenet = models.densenet121(weights=d_weights)
         self.densenet.classifier = nn.Identity()
 
         feat_dim = 2048 + 1024
+
+        if freeze_backbones:
+            for m in [self.resnet, self.densenet]:
+                for p_ in m.parameters():
+                    p_.requires_grad = False
 
         self.head = nn.Sequential(
             nn.Linear(feat_dim, hidden),
@@ -63,137 +66,323 @@ class HybridCNN(nn.Module):
     def forward(self, x):
         f1 = self.resnet(x)
         f2 = self.densenet(x)
-        return self.head(torch.cat([f1, f2], dim=1))
+        fused = torch.cat([f1, f2], dim=1)
+        return self.head(fused)
 
-# =========================================================
-# Image Transform (Training-Matched)
-# =========================================================
-def get_transform(img_size=224):
+# ----------------------------
+# Model Loader (Clean Version)
+# ----------------------------
+def load_model_clean(model_file, num_classes):
+    """
+    Load model silently without debug output
+    """
+    device = st.session_state.device
+    
+    checkpoint = torch.load(model_file, map_location=device)
+    
+    # Check for classes in checkpoint (silent)
+    if isinstance(checkpoint, dict) and 'classes' in checkpoint:
+        st.session_state.checkpoint_classes = checkpoint['classes']
+    
+    # Create model
+    model = HybridCNN(
+        num_classes=num_classes,
+        pretrained=False,
+        freeze_backbones=False,
+        hidden=1024,
+        p=0.5
+    )
+    
+    # Load state dict
+    if isinstance(checkpoint, dict):
+        if 'state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['state_dict'])
+        elif 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            model.load_state_dict(checkpoint)
+    else:
+        model = checkpoint
+    
+    model.to(device)
+    model.eval()
+    
+    return model
+
+# ----------------------------
+# Load Classes
+# ----------------------------
+def load_classes(classes_file):
+    content = classes_file.read().decode('utf-8')
+    classes = [line.strip() for line in content.split('\n') if line.strip()]
+    return classes
+
+# ----------------------------
+# Multiple Transform Options for Testing
+# ----------------------------
+def get_transform_v1(img_size=224):
+    """Original transform - exactly as training"""
     return transforms.Compose([
         transforms.Resize((img_size, img_size)),
         transforms.ToTensor(),
         transforms.Lambda(lambda t: t.expand(3, -1, -1) if t.shape[0] == 1 else t),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-# =========================================================
-# Load Classes
-# =========================================================
-def load_classes(file):
-    return [c.strip() for c in file.read().decode("utf-8").splitlines() if c.strip()]
+def get_transform_v2(img_size=224):
+    """Alternative: No lambda expansion"""
+    return transforms.Compose([
+        transforms.Resize((img_size, img_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
 
-# =========================================================
-# Load Model (Silent, Safe)
-# =========================================================
-def load_model(model_file, num_classes):
-    device = st.session_state.device
-    checkpoint = torch.load(model_file, map_location=device)
+def get_transform_v3(img_size=224):
+    """Alternative: With center crop"""
+    return transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(img_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
 
-    log(f"Checkpoint type: {type(checkpoint)}")
-
-    if isinstance(checkpoint, dict):
-        log(f"Checkpoint keys: {list(checkpoint.keys())}")
-
-        if "classes" in checkpoint:
-            st.session_state.checkpoint_classes = checkpoint["classes"]
-            log(f"Checkpoint classes found: {len(checkpoint['classes'])}")
-
-    model = HybridCNN(num_classes=num_classes)
-
-    if isinstance(checkpoint, dict):
-        if "state_dict" in checkpoint:
-            model.load_state_dict(checkpoint["state_dict"])
-            log("Loaded from state_dict")
-        elif "model_state_dict" in checkpoint:
-            model.load_state_dict(checkpoint["model_state_dict"])
-            log("Loaded from model_state_dict")
-        else:
-            model.load_state_dict(checkpoint)
-            log("Loaded raw state dict")
-
-    model.to(device).eval()
-    log(f"Model output features: {model.head[-1].out_features}")
-    return model
-
-# =========================================================
-# Prediction (Silent)
-# =========================================================
+# ----------------------------
+# Prediction Function (Clean Version)
+# ----------------------------
 @torch.no_grad()
-def predict(model, image, transform):
-    device = st.session_state.device
+def predict_clean(model, image, transform, device):
+    """
+    Predict without debug output
+    """
+    model.eval()
+    
+    # Preprocess and predict
+    input_tensor = transform(image).unsqueeze(0).to(device)
+    logits = model(input_tensor)
+    probabilities = torch.softmax(logits, dim=1)[0]
+    confidence, predicted_idx = torch.max(probabilities, 0)
+    
+    return predicted_idx.item(), confidence.item(), probabilities.cpu(), input_tensor
 
-    tensor = transform(image).unsqueeze(0).to(device)
-    logits = model(tensor)
-    probs = torch.softmax(logits, dim=1)[0]
+# ----------------------------
+# Grad-CAM Implementation
+# ----------------------------
+class GradCAM:
+    def __init__(self, model, target_layer):
+        self.model = model
+        self.target_layer = target_layer
+        self.gradients = None
+        self.activations = None
+        
+        # Register hooks
+        target_layer.register_forward_hook(self.save_activation)
+        target_layer.register_backward_hook(self.save_gradient)
+    
+    def save_activation(self, module, input, output):
+        self.activations = output.detach()
+    
+    def save_gradient(self, module, grad_input, grad_output):
+        self.gradients = grad_output[0].detach()
+    
+    def generate_cam(self, input_tensor, class_idx):
+        # Forward pass
+        self.model.eval()
+        output = self.model(input_tensor)
+        
+        # Backward pass
+        self.model.zero_grad()
+        class_loss = output[0, class_idx]
+        class_loss.backward()
+        
+        # Generate CAM
+        gradients = self.gradients[0]  # [C, H, W]
+        activations = self.activations[0]  # [C, H, W]
+        
+        # Global average pooling on gradients
+        weights = gradients.mean(dim=(1, 2))  # [C]
+        
+        # Weighted combination of activation maps
+        cam = torch.zeros(activations.shape[1:], device=activations.device)
+        for i, w in enumerate(weights):
+            cam += w * activations[i]
+        
+        # Apply ReLU
+        cam = F.relu(cam)
+        
+        # Normalize
+        cam = cam - cam.min()
+        if cam.max() != 0:
+            cam = cam / cam.max()
+        
+        return cam.cpu().numpy()
 
-    log(f"Logits: {logits.cpu().numpy()}")
-    log(f"Probabilities: {probs.cpu().numpy()}")
+def apply_colormap_on_image(org_img, activation_map):
+    """
+    Apply heatmap on image
+    """
+    # Resize activation map to match image size
+    h, w = org_img.shape[:2]
+    activation_map = cv2.resize(activation_map, (w, h))
+    
+    # Convert to heatmap
+    heatmap = cv2.applyColorMap(np.uint8(255 * activation_map), cv2.COLORMAP_JET)
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+    
+    # Superimpose heatmap on original image
+    superimposed = heatmap * 0.4 + org_img * 0.6
+    superimposed = np.clip(superimposed, 0, 255).astype(np.uint8)
+    
+    return superimposed
 
-    conf, idx = torch.max(probs, 0)
-    return idx.item(), conf.item(), probs.cpu().numpy()
-
-# =========================================================
+# ----------------------------
 # Sidebar
-# =========================================================
-st.sidebar.header("Configuration")
+# ----------------------------
+st.sidebar.header("⚙️ Configuration")
 
-model_file = st.sidebar.file_uploader("Model (.pth)", type=["pth"])
-classes_file = st.sidebar.file_uploader("Classes (.txt)", type=["txt"])
-img_size = st.sidebar.selectbox("Image Size", [224, 256], index=0)
-dev_mode = st.sidebar.checkbox("Developer Mode", value=False)
+model_file = st.sidebar.file_uploader("📦 Upload Model (.pth)", type=['pth', 'pt'])
+classes_file = st.sidebar.file_uploader("📋 Upload Classes (.txt)", type=['txt'])
 
-if st.sidebar.button("Load Model", type="primary"):
+img_size = st.sidebar.number_input("🖼️ Image Size", min_value=128, max_value=512, value=224, step=32)
+
+transform_version = st.sidebar.selectbox(
+    "🔄 Transform Version",
+    ["v1 (Original)", "v2 (No Lambda)", "v3 (Center Crop)"],
+    help="Try different transforms to see which matches training"
+)
+
+if st.sidebar.button("🔄 Load Model", type="primary"):
     if model_file and classes_file:
-        st.session_state.debug_logs.clear()
-        class_names = load_classes(classes_file)
-        model = load_model(model_file, len(class_names))
-        st.session_state.model = model
-        st.session_state.class_names = class_names
-        st.sidebar.success("Model loaded successfully")
+        with st.spinner("Loading model..."):
+            try:
+                class_names = load_classes(classes_file)
+                
+                model_file.seek(0)
+                model = load_model_clean(model_file, len(class_names))
+                
+                if model:
+                    st.session_state.model = model
+                    st.session_state.class_names = class_names
+                    st.sidebar.success("✅ Model loaded successfully!")
+                    st.sidebar.metric("Classes", len(class_names))
+                
+            except Exception as e:
+                st.sidebar.error(f"Error: {e}")
     else:
-        st.sidebar.error("Upload model and classes file")
+        st.sidebar.error("Please upload both files!")
 
-# =========================================================
-# Main Interface
-# =========================================================
-uploaded_image = st.file_uploader("Upload MRI Image", type=["jpg", "jpeg", "png"])
+st.sidebar.divider()
+if st.session_state.model:
+    st.sidebar.success("🟢 Model Ready")
+else:
+    st.sidebar.warning("🟡 No Model Loaded")
 
-if uploaded_image and st.session_state.model:
+# ----------------------------
+# Main Content
+# ----------------------------
+st.header("📤 Upload Test Image")
+
+uploaded_image = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"])
+
+if uploaded_image:
     image = Image.open(uploaded_image).convert("RGB")
-    st.image(image, use_container_width=True)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.image(image, caption="Uploaded Image", use_container_width=True)
+    
+    with col2:
+        if st.session_state.model:
+            if st.button("🚀 Classify Image", type="primary", use_container_width=True):
+                
+                # Select transform
+                if transform_version == "v1 (Original)":
+                    transform = get_transform_v1(img_size)
+                elif transform_version == "v2 (No Lambda)":
+                    transform = get_transform_v2(img_size)
+                else:
+                    transform = get_transform_v3(img_size)
+                
+                try:
+                    with st.spinner("🔬 Analyzing image..."):
+                        predicted_idx, confidence, probabilities, input_tensor = predict_clean(
+                            st.session_state.model,
+                            image,
+                            transform,
+                            st.session_state.device
+                        )
+                    
+                    # Use checkpoint classes if available
+                    display_classes = st.session_state.checkpoint_classes if st.session_state.checkpoint_classes else st.session_state.class_names
+                    
+                    predicted_class = display_classes[predicted_idx]
+                    
+                    # Main prediction
+                    st.success(f"### 🎯 Predicted: **{predicted_class}**")
+                    st.metric("Confidence", f"{confidence*100:.2f}%")
+                    st.progress(confidence)
+                    
+                    st.divider()
+                    
+                    # Top 5 table
+                    st.subheader("📊 Top 5 Predictions")
+                    
+                    probs_np = probabilities.numpy()
+                    top5_indices = np.argsort(probs_np)[-5:][::-1]
+                    
+                    top5_data = {
+                        'Rank': list(range(1, 6)),
+                        'Class': [display_classes[idx] for idx in top5_indices],
+                        'Probability': [f"{probs_np[idx]:.6f}" for idx in top5_indices],
+                        'Percentage': [f"{probs_np[idx]*100:.2f}%" for idx in top5_indices]
+                    }
+                    
+                    df = pd.DataFrame(top5_data)
+                    st.table(df)
+                    
+                    # Grad-CAM Visualization
+                    st.divider()
+                    st.subheader("🔥 Grad-CAM Visualization")
+                    
+                    with st.spinner("Generating Grad-CAM..."):
+                        try:
+                            # Get target layer (last conv layer of ResNet in HybridCNN)
+                            target_layer = st.session_state.model.resnet.layer4[-1].conv3
+                            
+                            # Generate Grad-CAM
+                            gradcam = GradCAM(st.session_state.model, target_layer)
+                            cam = gradcam.generate_cam(input_tensor, predicted_idx)
+                            
+                            # Convert original image to numpy
+                            org_img = np.array(image.resize((img_size, img_size)))
+                            
+                            # Apply heatmap
+                            gradcam_img = apply_colormap_on_image(org_img, cam)
+                            
+                            # Display Grad-CAM
+                            col_a, col_b, col_c = st.columns(3)
+                            
+                            with col_a:
+                                st.image(org_img, caption="Original", use_container_width=True)
+                            
+                            with col_b:
+                                # Show heatmap only
+                                heatmap_only = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
+                                heatmap_only = cv2.cvtColor(heatmap_only, cv2.COLOR_BGR2RGB)
+                                st.image(heatmap_only, caption="Attention Map", use_container_width=True)
+                            
+                            with col_c:
+                                st.image(gradcam_img, caption="Grad-CAM Overlay", use_container_width=True)
+                            
+                            st.caption("🔍 Red regions indicate areas that most influenced the prediction")
+                            
+                        except Exception as e:
+                            st.warning(f"Could not generate Grad-CAM: {str(e)}")
+                    
+                except Exception as e:
+                    st.error(f"Error: {e}")
+        else:
+            st.warning("Please load model first")
 
-    if st.button("Predict", type="primary"):
-        idx, conf, probs = predict(
-            st.session_state.model,
-            image,
-            get_transform(img_size)
-        )
-
-        classes = st.session_state.checkpoint_classes or st.session_state.class_names
-
-        st.success(f"Prediction: **{classes[idx]}**")
-        st.metric("Confidence", f"{conf*100:.2f}%")
-
-        with st.expander("Top-5 Predictions"):
-            top5 = np.argsort(probs)[-5:][::-1]
-            df = pd.DataFrame({
-                "Class": [classes[i] for i in top5],
-                "Probability (%)": [f"{probs[i]*100:.2f}" for i in top5]
-            })
-            st.table(df)
-
-elif uploaded_image and not st.session_state.model:
-    st.warning("Please load the model first")
-
-# =========================================================
-# Developer Debug Panel (Hidden)
-# =========================================================
-if dev_mode:
-    with st.expander("🛠 Developer Debug Logs", expanded=False):
-        for msg in st.session_state.debug_logs:
-            st.code(msg)
-
-st.caption("Inference Mode • Debugging Hidden by Default")
+st.divider()
+st.caption("HybridCNN - ResNet50 + DenseNet121 Fusion Architecture")
