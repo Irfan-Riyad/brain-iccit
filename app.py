@@ -1,4 +1,5 @@
 import streamlit as st
+import pandas as pd
 import torch
 import torch.nn as nn
 from torchvision import transforms, models
@@ -212,9 +213,25 @@ def predict_with_debug(model, image, transform, device, class_names):
     # Softmax
     probabilities = torch.softmax(logits, dim=1)[0]
     
-    st.write("**Probabilities:**")
-    for i, (cls, prob) in enumerate(zip(class_names, probabilities.cpu().numpy())):
-        st.write(f"- {cls}: {prob:.6f} ({prob*100:.2f}%)")
+    st.write("**Top 5 Predictions:**")
+    # Use checkpoint classes if available, otherwise use provided class_names
+    display_classes = st.session_state.checkpoint_classes if st.session_state.checkpoint_classes else class_names
+    
+    # Get top 5 predictions sorted by probability (descending)
+    probs_np = probabilities.cpu().numpy()
+    top5_indices = np.argsort(probs_np)[-5:][::-1]  # Get top 5 indices in descending order
+    
+    # Create data for table
+    import pandas as pd
+    top5_data = {
+        'Rank': list(range(1, 6)),
+        'Class': [display_classes[idx] for idx in top5_indices],
+        'Probability': [f"{probs_np[idx]:.6f}" for idx in top5_indices],
+        'Percentage': [f"{probs_np[idx]*100:.2f}%" for idx in top5_indices]
+    }
+    
+    df = pd.DataFrame(top5_data)
+    st.table(df)
     
     confidence, predicted_idx = torch.max(probabilities, 0)
     
@@ -335,50 +352,6 @@ if uploaded_image:
                     st.code(traceback.format_exc())
         else:
             st.warning("Please load model first")
-
-# ----------------------------
-# Troubleshooting Guide
-# ----------------------------
-st.divider()
-st.header("🔧 Troubleshooting Guide")
-
-st.markdown("""
-### Common Issues and Solutions:
-
-#### 1️⃣ **Class Order Mismatch** (Most Common!)
-- **Problem**: Classes in your `classes.txt` don't match training order
-- **Solution**: Check if your checkpoint has a 'classes' key - use that exact order
-- **Example**: Training used `[glioma, meningioma, notumor, pituitary]` but you uploaded `[glioma, notumor, meningioma, pituitary]`
-
-#### 2️⃣ **Wrong Number of Classes**
-- **Problem**: Model was trained with different number of classes
-- **Check**: Model output features vs. number of classes in txt file
-- **Solution**: Ensure your classes.txt has exactly the same number as training
-
-#### 3️⃣ **Image Preprocessing Mismatch**
-- **Problem**: Different normalization or resize method
-- **Try**: Different transform versions (v1, v2, v3)
-- **Check**: Your training code's validation transforms
-
-#### 4️⃣ **Wrong Checkpoint Loading**
-- **Problem**: Loading wrong part of checkpoint
-- **Check**: Debug output shows which key was used
-- **Common keys**: 'state_dict', 'model_state_dict', or direct model
-
-### 📋 What to Check:
-1. **Class order** in classes.txt matches training exactly
-2. **Number of classes** matches model output
-3. **Image size** (224 is standard)
-4. **Transform version** matches your validation pipeline
-5. **Checkpoint structure** - look for 'classes' key
-
-### 💡 Next Steps:
-1. Check the debug output above when you predict
-2. Compare "Classes from file" vs "Classes from checkpoint" 
-3. If they don't match, reorder your classes.txt file
-4. Try different transform versions
-5. Verify the logits and probabilities make sense
-""")
 
 st.divider()
 st.caption("Debug Mode - Identifies prediction issues")
