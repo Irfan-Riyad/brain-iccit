@@ -357,48 +357,126 @@ if uploaded_image:
                     
                     # Grad-CAM Visualization
                     st.divider()
-                    st.subheader("🔥 Grad-CAM: Tumor Localization")
+                    st.header("🔥 Multi-Layer Grad-CAM Analysis")
+                    st.markdown("**Compare different network layers to find the best tumor localization**")
                     
                     # Add threshold slider for user control
-                    threshold = st.slider(
-                        "Attention Threshold (Higher = More Specific)",
-                        min_value=0.0,
-                        max_value=0.9,
-                        value=0.5,
-                        step=0.1,
-                        help="Adjust to highlight only high-confidence regions"
-                    )
+                    col_slider1, col_slider2 = st.columns(2)
+                    with col_slider1:
+                        threshold = st.slider(
+                            "Attention Threshold",
+                            min_value=0.0,
+                            max_value=0.9,
+                            value=0.5,
+                            step=0.1,
+                            help="Higher = More specific localization"
+                        )
+                    with col_slider2:
+                        selected_layers = st.multiselect(
+                            "Select Layers to Compare",
+                            ["ResNet Layer 3", "ResNet Layer 4", "DenseNet Transition 2", "DenseNet Dense Block 4"],
+                            default=["ResNet Layer 4", "DenseNet Dense Block 4"],
+                            help="Choose which layers to visualize"
+                        )
                     
-                    with st.spinner("Generating Grad-CAM..."):
+                    with st.spinner("Generating Multi-Layer Grad-CAM..."):
                         try:
-                            # Get target layer (last conv layer of ResNet in HybridCNN)
-                            target_layer = st.session_state.model.resnet.layer4[-1].conv3
-                            
-                            # Generate Grad-CAM
-                            gradcam = GradCAM(st.session_state.model, target_layer)
-                            cam = gradcam.generate_cam(input_tensor, predicted_idx)
-                            
                             # Convert original image to numpy
                             org_img = np.array(image.resize((img_size, img_size)))
                             
-                            # Apply enhanced heatmap
-                            gradcam_img, cam_thresholded = apply_enhanced_colormap(org_img, cam, threshold)
+                            # Define multiple target layers for comparison
+                            layer_configs = {
+                                "ResNet Layer 3": st.session_state.model.resnet.layer3[-1].conv3,
+                                "ResNet Layer 4": st.session_state.model.resnet.layer4[-1].conv3,
+                                "DenseNet Transition 2": st.session_state.model.densenet.features.transition2.conv,
+                                "DenseNet Dense Block 4": st.session_state.model.densenet.features.denseblock4.denselayer16.conv2
+                            }
                             
-                            # Display in two columns
-                            col_grad1, col_grad2 = st.columns(2)
+                            # Show original image larger
+                            st.subheader("📷 Original MRI Scan")
+                            st.image(org_img, width=400)
                             
-                            with col_grad1:
-                                st.image(org_img, caption="Original MRI Scan", use_container_width=True)
+                            st.divider()
+                            st.subheader("🎯 Grad-CAM Comparisons")
                             
-                            with col_grad2:
-                                st.image(gradcam_img, caption="Tumor Region Highlighted", use_container_width=True)
+                            # Generate Grad-CAM for each selected layer
+                            results = []
+                            for layer_name in selected_layers:
+                                if layer_name in layer_configs:
+                                    target_layer = layer_configs[layer_name]
+                                    
+                                    # Generate Grad-CAM
+                                    gradcam = GradCAM(st.session_state.model, target_layer)
+                                    cam = gradcam.generate_cam(input_tensor, predicted_idx)
+                                    
+                                    # Apply enhanced heatmap
+                                    gradcam_img, cam_thresholded = apply_enhanced_colormap(org_img, cam, threshold)
+                                    
+                                    # Calculate metrics
+                                    tumor_coverage = (cam_thresholded > 0).sum() / cam_thresholded.size * 100
+                                    max_intensity = cam_thresholded.max()
+                                    focus_score = (cam_thresholded > 0.7).sum() / (cam_thresholded > 0).sum() * 100 if (cam_thresholded > 0).sum() > 0 else 0
+                                    
+                                    results.append({
+                                        'name': layer_name,
+                                        'image': gradcam_img,
+                                        'coverage': tumor_coverage,
+                                        'intensity': max_intensity,
+                                        'focus': focus_score
+                                    })
                             
-                            # Show localization stats
-                            tumor_coverage = (cam_thresholded > 0).sum() / cam_thresholded.size * 100
-                            st.caption(f"🎯 **Detected Region Coverage:** {tumor_coverage:.1f}% of image | 🔴 Red areas indicate suspected tumor location")
+                            # Display results in grid
+                            if len(results) == 1:
+                                st.image(results[0]['image'], caption=results[0]['name'], width=600)
+                                st.metric("Coverage", f"{results[0]['coverage']:.1f}%")
+                                st.metric("Max Intensity", f"{results[0]['intensity']:.2f}")
+                                st.metric("Focus Score", f"{results[0]['focus']:.1f}%")
+                                
+                            elif len(results) == 2:
+                                col1, col2 = st.columns(2)
+                                for idx, (col, result) in enumerate(zip([col1, col2], results)):
+                                    with col:
+                                        st.image(result['image'], caption=result['name'], use_container_width=True)
+                                        st.markdown(f"**Coverage:** {result['coverage']:.1f}%")
+                                        st.markdown(f"**Max Intensity:** {result['intensity']:.2f}")
+                                        st.markdown(f"**Focus Score:** {result['focus']:.1f}%")
+                                        
+                            elif len(results) >= 3:
+                                col1, col2 = st.columns(2)
+                                for idx, result in enumerate(results):
+                                    with col1 if idx % 2 == 0 else col2:
+                                        st.image(result['image'], caption=result['name'], use_container_width=True)
+                                        st.markdown(f"**Coverage:** {result['coverage']:.1f}%")
+                                        st.markdown(f"**Max Intensity:** {result['intensity']:.2f}")
+                                        st.markdown(f"**Focus Score:** {result['focus']:.1f}%")
+                                        st.divider()
+                            
+                            # Best layer recommendation
+                            if results:
+                                st.divider()
+                                st.subheader("📊 Analysis Summary")
+                                
+                                # Find best layer based on focus score
+                                best_layer = max(results, key=lambda x: x['focus'])
+                                st.success(f"🏆 **Recommended Layer:** {best_layer['name']}")
+                                st.info(f"This layer shows the most focused tumor localization with {best_layer['focus']:.1f}% focus score")
+                                
+                                # Metrics explanation
+                                with st.expander("ℹ️ Understanding the Metrics"):
+                                    st.markdown("""
+                                    - **Coverage**: Percentage of image area highlighted (lower may be better for focused tumors)
+                                    - **Max Intensity**: Peak activation strength (higher = stronger detection)
+                                    - **Focus Score**: Percentage of high-confidence regions (higher = more precise localization)
+                                    
+                                    🎯 **Best Layer**: Typically has high focus score and reasonable coverage
+                                    """)
+                            
+                            st.caption("🔴 **Red/Hot areas indicate suspected tumor regions** | Brighter colors = Higher confidence")
                             
                         except Exception as e:
-                            st.warning(f"Could not generate Grad-CAM: {str(e)}")
+                            st.error(f"Error generating Grad-CAM: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
                     
                 except Exception as e:
                     st.error(f"Error: {e}")
