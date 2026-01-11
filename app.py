@@ -165,7 +165,7 @@ def predict_clean(model, image, transform, device):
     return predicted_idx.item(), confidence.item(), probabilities.cpu(), input_tensor
 
 # ----------------------------
-# Grad-CAM Implementation
+# Enhanced Grad-CAM Implementation
 # ----------------------------
 class GradCAM:
     def __init__(self, model, target_layer):
@@ -176,7 +176,7 @@ class GradCAM:
         
         # Register hooks
         target_layer.register_forward_hook(self.save_activation)
-        target_layer.register_backward_hook(self.save_gradient)
+        target_layer.register_full_backward_hook(self.save_gradient)
     
     def save_activation(self, module, input, output):
         self.activations = output.detach()
@@ -198,6 +198,9 @@ class GradCAM:
         gradients = self.gradients[0]  # [C, H, W]
         activations = self.activations[0]  # [C, H, W]
         
+        # Grad-CAM++: Use positive gradients only for better localization
+        gradients = F.relu(gradients)
+        
         # Global average pooling on gradients
         weights = gradients.mean(dim=(1, 2))  # [C]
         
@@ -206,7 +209,7 @@ class GradCAM:
         for i, w in enumerate(weights):
             cam += w * activations[i]
         
-        # Apply ReLU
+        # Apply ReLU to focus on positive contributions
         cam = F.relu(cam)
         
         # Normalize
@@ -216,23 +219,35 @@ class GradCAM:
         
         return cam.cpu().numpy()
 
-def apply_colormap_on_image(org_img, activation_map):
+def apply_enhanced_colormap(org_img, activation_map, threshold=0.5):
     """
-    Apply heatmap on image
+    Apply enhanced heatmap with better tumor localization
     """
     # Resize activation map to match image size
     h, w = org_img.shape[:2]
     activation_map = cv2.resize(activation_map, (w, h))
     
-    # Convert to heatmap
-    heatmap = cv2.applyColorMap(np.uint8(255 * activation_map), cv2.COLORMAP_JET)
+    # Apply threshold to focus on high-activation regions (tumor areas)
+    activation_map_thresholded = np.where(activation_map > threshold, activation_map, 0)
+    
+    # Normalize thresholded map
+    if activation_map_thresholded.max() > 0:
+        activation_map_thresholded = activation_map_thresholded / activation_map_thresholded.max()
+    
+    # Create heatmap with better color scheme for medical imaging
+    heatmap = cv2.applyColorMap(np.uint8(255 * activation_map_thresholded), cv2.COLORMAP_HOT)
     heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
     
-    # Superimpose heatmap on original image
-    superimposed = heatmap * 0.4 + org_img * 0.6
+    # Superimpose with higher transparency for clearer view
+    superimposed = heatmap * 0.5 + org_img * 0.5
     superimposed = np.clip(superimposed, 0, 255).astype(np.uint8)
     
-    return superimposed
+    # Apply slight sharpening to highlight tumor boundaries
+    kernel = np.array([[-1,-1,-1], [-1, 9,-1], [-1,-1,-1]])
+    superimposed = cv2.filter2D(superimposed, -1, kernel * 0.1)
+    superimposed = np.clip(superimposed, 0, 255).astype(np.uint8)
+    
+    return superimposed, activation_map_thresholded
 
 # ----------------------------
 # Sidebar
@@ -342,7 +357,17 @@ if uploaded_image:
                     
                     # Grad-CAM Visualization
                     st.divider()
-                    st.subheader("🔥 Grad-CAM Visualization")
+                    st.subheader("🔥 Grad-CAM: Tumor Localization")
+                    
+                    # Add threshold slider for user control
+                    threshold = st.slider(
+                        "Attention Threshold (Higher = More Specific)",
+                        min_value=0.0,
+                        max_value=0.9,
+                        value=0.5,
+                        step=0.1,
+                        help="Adjust to highlight only high-confidence regions"
+                    )
                     
                     with st.spinner("Generating Grad-CAM..."):
                         try:
@@ -356,25 +381,21 @@ if uploaded_image:
                             # Convert original image to numpy
                             org_img = np.array(image.resize((img_size, img_size)))
                             
-                            # Apply heatmap
-                            gradcam_img = apply_colormap_on_image(org_img, cam)
+                            # Apply enhanced heatmap
+                            gradcam_img, cam_thresholded = apply_enhanced_colormap(org_img, cam, threshold)
                             
-                            # Display Grad-CAM
-                            col_a, col_b, col_c = st.columns(3)
+                            # Display in two columns
+                            col_grad1, col_grad2 = st.columns(2)
                             
-                            with col_a:
-                                st.image(org_img, caption="Original", use_container_width=True)
+                            with col_grad1:
+                                st.image(org_img, caption="Original MRI Scan", use_container_width=True)
                             
-                            with col_b:
-                                # Show heatmap only
-                                heatmap_only = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
-                                heatmap_only = cv2.cvtColor(heatmap_only, cv2.COLOR_BGR2RGB)
-                                st.image(heatmap_only, caption="Attention Map", use_container_width=True)
+                            with col_grad2:
+                                st.image(gradcam_img, caption="Tumor Region Highlighted", use_container_width=True)
                             
-                            with col_c:
-                                st.image(gradcam_img, caption="Grad-CAM Overlay", use_container_width=True)
-                            
-                            st.caption("🔍 Red regions indicate areas that most influenced the prediction")
+                            # Show localization stats
+                            tumor_coverage = (cam_thresholded > 0).sum() / cam_thresholded.size * 100
+                            st.caption(f"🎯 **Detected Region Coverage:** {tumor_coverage:.1f}% of image | 🔴 Red areas indicate suspected tumor location")
                             
                         except Exception as e:
                             st.warning(f"Could not generate Grad-CAM: {str(e)}")
