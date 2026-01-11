@@ -357,8 +357,8 @@ if uploaded_image:
                     
                     # Grad-CAM Visualization
                     st.divider()
-                    st.header("🔥 Multi-Layer Grad-CAM Analysis")
-                    st.markdown("**Compare different network layers to find the best tumor localization**")
+                    st.header("🔥 HybridCNN Multi-Layer Grad-CAM Analysis")
+                    st.markdown("**Compare ResNet50 and DenseNet121 backbones for best tumor localization**")
                     
                     # Add threshold slider for user control
                     col_slider1, col_slider2 = st.columns(2)
@@ -374,8 +374,8 @@ if uploaded_image:
                     with col_slider2:
                         selected_layers = st.multiselect(
                             "Select Layers to Compare",
-                            ["ResNet Layer 3", "ResNet Layer 4", "DenseNet Transition 2", "DenseNet Dense Block 4"],
-                            default=["ResNet Layer 4", "DenseNet Dense Block 4"],
+                            ["HybridCNN (Fusion)", "ResNet50 (Layer 4)", "ResNet50 (Layer 3)", "DenseNet121 (Block 4)", "DenseNet121 (Transition 3)"],
+                            default=["HybridCNN (Fusion)", "ResNet50 (Layer 4)", "DenseNet121 (Block 4)"],
                             help="Choose which layers to visualize"
                         )
                     
