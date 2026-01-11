@@ -464,9 +464,9 @@ if st.session_state.last_prediction:
     with col_config1:
         selected_layer = st.radio(
             "Select Layer to Visualize",
-            ["HybridCNN (Fusion)", "ResNet50 (Layer 4)", "ResNet50 (Layer 3)", "DenseNet121 (Block 4)", "DenseNet121 (Transition 3)"],
-            index=1,
-            help="Choose ONE layer to see its activation map"
+            ["HybridCNN (Fusion)"],
+            index=0,
+            help="Visualize combined ResNet50 + DenseNet121 features"
         )
     
     with col_config2:
@@ -491,16 +491,8 @@ if st.session_state.last_prediction:
                 # Convert original image to numpy
                 org_img = np.array(image.resize((img_size, img_size)))
                 
-                # Define target layers
-                layer_map = {
-                    "HybridCNN (Fusion)": st.session_state.model.resnet.layer4[-1].conv3,  # Use ResNet last layer instead
-                    "ResNet50 (Layer 4)": st.session_state.model.resnet.layer4[-1].conv3,
-                    "ResNet50 (Layer 3)": st.session_state.model.resnet.layer3[-1].conv3,
-                    "DenseNet121 (Block 4)": st.session_state.model.densenet.features.denseblock4.denselayer16.conv2,
-                    "DenseNet121 (Transition 3)": st.session_state.model.densenet.features.transition3.conv
-                }
-                
-                target_layer = layer_map[selected_layer]
+                # Define target layer - HybridCNN Fusion only
+                target_layer = st.session_state.model.resnet.layer4[-1].conv3  # Combined features visualization
                 
                 # Generate Grad-CAM
                 gradcam = GradCAM(st.session_state.model, target_layer)
@@ -542,15 +534,15 @@ if st.session_state.last_prediction:
                 st.caption("🔴 **Red/Hot areas indicate regions that influenced the prediction** | Brighter colors = Higher confidence")
                 
                 # Layer explanation
-                with st.expander("ℹ️ About This Layer"):
-                    layer_info = {
-                        "HybridCNN (Fusion)": "Shows combined features from both ResNet50 and DenseNet121. Uses ResNet Layer 4 as the base for visualization since fusion happens after feature extraction.",
-                        "ResNet50 (Layer 4)": "Deepest ResNet layer with most abstract features. Captures high-level patterns and complex tumor characteristics.",
-                        "ResNet50 (Layer 3)": "Mid-level ResNet features. Good for detecting structural patterns and edges in the tumor.",
-                        "DenseNet121 (Block 4)": "Final DenseNet block with rich feature connections. Excellent for detailed texture analysis.",
-                        "DenseNet121 (Transition 3)": "DenseNet transition layer that refines features. Good for feature compression and efficiency."
-                    }
-                    st.markdown(f"**{selected_layer}**: {layer_info[selected_layer]}")
+                with st.expander("ℹ️ About HybridCNN Fusion"):
+                    st.markdown("""
+                    **HybridCNN (Fusion)** visualizes the combined features from both ResNet50 and DenseNet121 backbones.
+                    
+                    - Shows where the model focuses when combining both architectures
+                    - Leverages strengths of both ResNet (hierarchical features) and DenseNet (dense connections)
+                    - Best representation of the overall decision-making process
+                    - Red/hot regions indicate areas that most influenced the tumor classification
+                    """)
                 
             except Exception as e:
                 st.error(f"Error generating Grad-CAM: {str(e)}")
