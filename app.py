@@ -115,6 +115,7 @@ import time
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
+import traceback
 
 # ----------------------------
 # Page Config
@@ -387,6 +388,7 @@ if st.sidebar.button("🔄 Load Model", type="primary"):
                 
             except Exception as e:
                 st.sidebar.error(f"Error: {e}")
+                st.sidebar.code(traceback.format_exc())
     else:
         st.sidebar.error("Please upload both files!")
 
