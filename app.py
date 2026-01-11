@@ -64,10 +64,10 @@ class HybridCNN(nn.Module):
                 for p_ in m.parameters():
                     p_.requires_grad = False
 
-        # --- Fusion + Classifier Head ---
+        # --- Fusion + Classifier Head (No in-place operations for Grad-CAM) ---
         self.head = nn.Sequential(
             nn.Linear(feat_dim, hidden),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),  # Changed to False for Grad-CAM compatibility
             nn.Dropout(p),
             nn.Linear(hidden, num_classes)
         )
@@ -208,6 +208,10 @@ class GradCAM:
         self.gradients = grad_output[0].detach()
     
     def generate_cam(self, input_tensor, class_idx):
+        # Clone input to avoid in-place modification issues
+        input_tensor = input_tensor.clone()
+        input_tensor.requires_grad = True
+        
         # Forward pass
         self.model.eval()
         output = self.model(input_tensor)
@@ -218,8 +222,8 @@ class GradCAM:
         class_loss.backward()
         
         # Generate CAM
-        gradients = self.gradients[0]  # [C, H, W]
-        activations = self.activations[0]  # [C, H, W]
+        gradients = self.gradients[0].clone()  # [C, H, W]
+        activations = self.activations[0].clone()  # [C, H, W]
         
         # Grad-CAM++: Use positive gradients only for better localization
         gradients = F.relu(gradients)
