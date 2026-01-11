@@ -1,109 +1,4 @@
-# ----------------------------
-# Grad-CAM Section (Separate, Below Main Content)
-# ----------------------------
-if st.session_state.last_prediction:
-    st.divider()
-    st.header("🔥 Grad-CAM: Tumor Localization Analysis")
-    st.markdown("**Visualize which regions influenced the model's prediction**")
-    
-    # Layer selection with radio button for single selection
-    col_config1, col_config2 = st.columns(2)
-    
-    with col_config1:
-        selected_layer = st.radio(
-            "Select Layer to Visualize",
-            ["HybridCNN (Fusion)", "ResNet50 (Layer 4)", "ResNet50 (Layer 3)", "DenseNet121 (Block 4)", "DenseNet121 (Transition 3)"],
-            index=1,
-            help="Choose ONE layer to see its activation map"
-        )
-    
-    with col_config2:
-        threshold = st.slider(
-            "Attention Threshold",
-            min_value=0.0,
-            max_value=0.9,
-            value=0.5,
-            step=0.1,
-            help="Higher = More specific localization"
-        )
-    
-    # Generate button
-    if st.button("🔍 Generate Grad-CAM", type="primary", use_container_width=True):
-        with st.spinner(f"Generating Grad-CAM for {selected_layer}..."):
-            try:
-                # Get data from session
-                input_tensor = st.session_state.last_prediction['input_tensor']
-                predicted_idx = st.session_state.last_prediction['predicted_idx']
-                image = st.session_state.last_prediction['image']
-                
-                # Convert original image to numpy
-                org_img = np.array(image.resize((img_size, img_size)))
-                
-                # Define target layers
-                layer_map = {
-                    "HybridCNN (Fusion)": st.session_state.model.head[0],
-                    "ResNet50 (Layer 4)": st.session_state.model.resnet.layer4[-1].conv3,
-                    "ResNet50 (Layer 3)": st.session_state.model.resnet.layer3[-1].conv3,
-                    "DenseNet121 (Block 4)": st.session_state.model.densenet.features.denseblock4.denselayer16.conv2,
-                    "DenseNet121 (Transition 3)": st.session_state.model.densenet.features.transition3.conv
-                }
-                
-                target_layer = layer_map[selected_layer]
-                
-                # Generate Grad-CAM
-                gradcam = GradCAM(st.session_state.model, target_layer)
-                cam = gradcam.generate_cam(input_tensor, predicted_idx)
-                
-                # Apply enhanced heatmap
-                gradcam_img, cam_thresholded = apply_enhanced_colormap(org_img, cam, threshold)
-                
-                # Calculate metrics
-                tumor_coverage = (cam_thresholded > 0).sum() / cam_thresholded.size * 100
-                max_intensity = cam_thresholded.max()
-                focus_score = (cam_thresholded > 0.7).sum() / (cam_thresholded > 0).sum() * 100 if (cam_thresholded > 0).sum() > 0 else 0
-                
-                # Display results
-                st.subheader(f"📍 {selected_layer} Visualization")
-                
-                # Two column display
-                vis_col1, vis_col2 = st.columns(2)
-                
-                with vis_col1:
-                    st.image(org_img, caption="Original MRI Scan", use_container_width=True)
-                
-                with vis_col2:
-                    st.image(gradcam_img, caption=f"Grad-CAM: {selected_layer}", use_container_width=True)
-                
-                # Metrics in columns
-                st.divider()
-                met_col1, met_col2, met_col3 = st.columns(3)
-                
-                with met_col1:
-                    st.metric("Coverage", f"{tumor_coverage:.1f}%", help="Percentage of image highlighted")
-                
-                with met_col2:
-                    st.metric("Max Intensity", f"{max_intensity:.2f}", help="Peak activation strength")
-                
-                with met_col3:
-                    st.metric("Focus Score", f"{focus_score:.1f}%", help="Precision of localization")
-                
-                st.caption("🔴 **Red/Hot areas indicate regions that influenced the prediction** | Brighter colors = Higher confidence")
-                
-                # Layer explanation
-                with st.expander("ℹ️ About This Layer"):
-                    layer_info = {
-                        "HybridCNN (Fusion)": "Shows how the model combines ResNet50 and DenseNet121 features. Best for understanding the overall decision-making process.",
-                        "ResNet50 (Layer 4)": "Deepest ResNet layer with most abstract features. Captures high-level patterns and complex tumor characteristics.",
-                        "ResNet50 (Layer 3)": "Mid-level ResNet features. Good for detecting structural patterns and edges in the tumor.",
-                        "DenseNet121 (Block 4)": "Final DenseNet block with rich feature connections. Excellent for detailed texture analysis.",
-                        "DenseNet121 (Transition 3)": "DenseNet transition layer that refines features. Good for feature compression and efficiency."
-                    }
-                    st.markdown(f"**{selected_layer}**: {layer_info[selected_layer]}")
-                
-            except Exception as e:
-                st.error(f"Error generating Grad-CAM: {str(e)}")
-                import traceback
-                st.code(traceback.format_exc())import streamlit as st
+import streamlit as st
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -121,15 +16,16 @@ import traceback
 # Page Config
 # ----------------------------
 st.set_page_config(
-    page_title="Brain Tumor Classifier - Debug Mode", 
+    page_title="Brain Tumor Classifier", 
     page_icon="🧠",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 st.title("🧠 HybridCNN Brain Tumor Classifier")
 
 # ----------------------------
-# Session State
+# Session State Initialization
 # ----------------------------
 if 'model' not in st.session_state:
     st.session_state.model = None
@@ -137,11 +33,15 @@ if 'class_names' not in st.session_state:
     st.session_state.class_names = None
 if 'device' not in st.session_state:
     st.session_state.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if 'model_loaded' not in st.session_state:
+    st.session_state.model_loaded = False
+if 'last_prediction' not in st.session_state:
+    st.session_state.last_prediction = None
 if 'checkpoint_classes' not in st.session_state:
     st.session_state.checkpoint_classes = None
 
 # ----------------------------
-# HybridCNN Model (Exact Match)
+# Hybrid CNN Model Definition (Exact Match)
 # ----------------------------
 class HybridCNN(nn.Module):
     def __init__(self, num_classes, pretrained=True, freeze_backbones=True, hidden=1024, p=0.5):
@@ -149,19 +49,22 @@ class HybridCNN(nn.Module):
         r_weights = models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
         d_weights = models.DenseNet121_Weights.IMAGENET1K_V1 if pretrained else None
 
+        # --- Backbone A: ResNet50 ---
         self.resnet = models.resnet50(weights=r_weights)
         self.resnet.fc = nn.Identity()
 
+        # --- Backbone B: DenseNet121 ---
         self.densenet = models.densenet121(weights=d_weights)
         self.densenet.classifier = nn.Identity()
 
-        feat_dim = 2048 + 1024
+        feat_dim = 2048 + 1024  # ResNet50 output + DenseNet121 output
 
         if freeze_backbones:
             for m in [self.resnet, self.densenet]:
                 for p_ in m.parameters():
                     p_.requires_grad = False
 
+        # --- Fusion + Classifier Head ---
         self.head = nn.Sequential(
             nn.Linear(feat_dim, hidden),
             nn.ReLU(inplace=True),
@@ -216,16 +119,19 @@ def load_model_clean(model_file, num_classes):
     return model
 
 # ----------------------------
-# Load Classes
+# Exact Inference Transforms (Matching Training)
 # ----------------------------
-def load_classes(classes_file):
-    content = classes_file.read().decode('utf-8')
-    classes = [line.strip() for line in content.split('\n') if line.strip()]
-    return classes
+def get_inference_transform(img_size=224):
+    """
+    Returns transforms that exactly match validation/test transforms
+    """
+    return transforms.Compose([
+        transforms.Resize((img_size, img_size)),
+        transforms.ToTensor(),
+        transforms.Lambda(lambda t: t.expand(3, -1, -1) if t.shape[0] == 1 else t),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
 
-# ----------------------------
-# Multiple Transform Options for Testing
-# ----------------------------
 def get_transform_v1(img_size=224):
     """Original transform - exactly as training"""
     return transforms.Compose([
@@ -251,6 +157,17 @@ def get_transform_v3(img_size=224):
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
+
+# ----------------------------
+# Load Classes from File
+# ----------------------------
+def load_classes(classes_file):
+    """
+    Load class names from uploaded text file
+    """
+    content = classes_file.read().decode('utf-8')
+    classes = [line.strip() for line in content.split('\n') if line.strip()]
+    return classes
 
 # ----------------------------
 # Prediction Function (Clean Version)
@@ -356,14 +273,33 @@ def apply_enhanced_colormap(org_img, activation_map, threshold=0.5):
     return superimposed, activation_map_thresholded
 
 # ----------------------------
-# Sidebar
+# Sidebar Configuration
 # ----------------------------
-st.sidebar.header("⚙️ Configuration")
+st.sidebar.header("⚙️ Model Configuration")
 
-model_file = st.sidebar.file_uploader("📦 Upload Model (.pth)", type=['pth', 'pt'])
-classes_file = st.sidebar.file_uploader("📋 Upload Classes (.txt)", type=['txt'])
+# Model file uploader
+model_file = st.sidebar.file_uploader(
+    "📦 Upload Model (.pth)",
+    type=['pth', 'pt'],
+    help="Upload your trained HybridCNN model checkpoint"
+)
 
-img_size = st.sidebar.number_input("🖼️ Image Size", min_value=128, max_value=512, value=224, step=32)
+# Classes file uploader
+classes_file = st.sidebar.file_uploader(
+    "📋 Upload Classes (.txt)",
+    type=['txt'],
+    help="Upload text file with one class name per line"
+)
+
+# Image size configuration
+img_size = st.sidebar.number_input(
+    "🖼️ Input Image Size",
+    min_value=128,
+    max_value=512,
+    value=224,
+    step=32,
+    help="Must match training image size (default: 224)"
+)
 
 transform_version = st.sidebar.selectbox(
     "🔄 Transform Version",
@@ -371,6 +307,7 @@ transform_version = st.sidebar.selectbox(
     help="Try different transforms to see which matches training"
 )
 
+# Load model button
 if st.sidebar.button("🔄 Load Model", type="primary"):
     if model_file and classes_file:
         with st.spinner("Loading model..."):
@@ -383,6 +320,7 @@ if st.sidebar.button("🔄 Load Model", type="primary"):
                 if model:
                     st.session_state.model = model
                     st.session_state.class_names = class_names
+                    st.session_state.model_loaded = True
                     st.sidebar.success("✅ Model loaded successfully!")
                     st.sidebar.metric("Classes", len(class_names))
                 
@@ -392,90 +330,240 @@ if st.sidebar.button("🔄 Load Model", type="primary"):
     else:
         st.sidebar.error("Please upload both files!")
 
+# Display loaded classes
+if st.session_state.class_names and st.session_state.model_loaded:
+    with st.sidebar.expander("📋 Loaded Classes", expanded=False):
+        for idx, class_name in enumerate(st.session_state.class_names):
+            st.text(f"{idx}: {class_name}")
+
 st.sidebar.divider()
-if st.session_state.model:
+
+# Model status indicator
+if st.session_state.model_loaded:
     st.sidebar.success("🟢 Model Ready")
 else:
-    st.sidebar.warning("🟡 No Model Loaded")
+    st.sidebar.warning("🟡 Model Not Loaded")
+
+st.sidebar.caption("🧠 HybridCNN v1.0 | ResNet50 + DenseNet121")
 
 # ----------------------------
-# Main Content
+# Main Content Area
 # ----------------------------
-st.header("📤 Upload Test Image")
+st.header("📤 Upload & Analyze MRI Scan")
 
-uploaded_image = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"])
+col1, col2 = st.columns([1, 1], gap="large")
 
-if uploaded_image:
-    image = Image.open(uploaded_image).convert("RGB")
+with col1:
+    st.subheader("📷 Image Upload")
     
-    col1, col2 = st.columns(2)
+    uploaded_image = st.file_uploader(
+        "Choose a brain MRI scan",
+        type=["jpg", "jpeg", "png", "bmp", "tiff"],
+        help="Upload a brain MRI image for classification"
+    )
     
-    with col1:
+    if uploaded_image is not None:
+        image = Image.open(uploaded_image).convert("RGB")
         st.image(image, caption="Uploaded Image", use_container_width=True)
+        st.caption(f"📏 Size: {image.size[0]} x {image.size[1]} pixels")
+
+with col2:
+    st.subheader("🎯 Prediction Results")
     
-    with col2:
-        if st.session_state.model and uploaded_image:
+    if st.session_state.model and uploaded_image:
+        try:
+            # Select transform
+            if transform_version == "v1 (Original)":
+                transform = get_transform_v1(img_size)
+            elif transform_version == "v2 (No Lambda)":
+                transform = get_transform_v2(img_size)
+            else:
+                transform = get_transform_v3(img_size)
+            
+            with st.spinner("🔬 Analyzing image..."):
+                predicted_idx, confidence, probabilities, input_tensor = predict_clean(
+                    st.session_state.model,
+                    image,
+                    transform,
+                    st.session_state.device
+                )
+            
+            # Use checkpoint classes if available
+            display_classes = st.session_state.checkpoint_classes if st.session_state.checkpoint_classes else st.session_state.class_names
+            
+            predicted_class = display_classes[predicted_idx]
+            
+            # Main prediction
+            st.success(f"### 🎯 Predicted: **{predicted_class}**")
+            st.metric("Confidence", f"{confidence*100:.2f}%")
+            st.progress(confidence)
+            
+            st.divider()
+            
+            # Top 5 table
+            st.subheader("📊 Top 5 Predictions")
+            
+            probs_np = probabilities.numpy()
+            top5_indices = np.argsort(probs_np)[-5:][::-1]
+            
+            top5_data = {
+                'Rank': list(range(1, 6)),
+                'Class': [display_classes[idx] for idx in top5_indices],
+                'Probability': [f"{probs_np[idx]:.6f}" for idx in top5_indices],
+                'Percentage': [f"{probs_np[idx]*100:.2f}%" for idx in top5_indices]
+            }
+            
+            df = pd.DataFrame(top5_data)
+            st.table(df)
+            
+            # Store in session state for Grad-CAM
+            st.session_state.last_prediction = {
+                'input_tensor': input_tensor,
+                'predicted_idx': predicted_idx,
+                'image': image,
+                'display_classes': display_classes
+            }
+            
+        except Exception as e:
+            st.error(f"Error: {e}")
+            st.code(traceback.format_exc())
+    elif not st.session_state.model:
+        st.warning("⚠️ Please load model first")
+    else:
+        st.info("👆 Upload an image to get started")
+
+# ----------------------------
+# Grad-CAM Section (Separate, Below Main Content)
+# ----------------------------
+if st.session_state.last_prediction:
+    st.divider()
+    st.header("🔥 Grad-CAM: Tumor Localization Analysis")
+    st.markdown("**Visualize which regions influenced the model's prediction**")
+    
+    # Layer selection with radio button for single selection
+    col_config1, col_config2 = st.columns(2)
+    
+    with col_config1:
+        selected_layer = st.radio(
+            "Select Layer to Visualize",
+            ["HybridCNN (Fusion)", "ResNet50 (Layer 4)", "ResNet50 (Layer 3)", "DenseNet121 (Block 4)", "DenseNet121 (Transition 3)"],
+            index=1,
+            help="Choose ONE layer to see its activation map"
+        )
+    
+    with col_config2:
+        threshold = st.slider(
+            "Attention Threshold",
+            min_value=0.0,
+            max_value=0.9,
+            value=0.5,
+            step=0.1,
+            help="Higher = More specific localization"
+        )
+    
+    # Generate button
+    if st.button("🔍 Generate Grad-CAM", type="primary", use_container_width=True):
+        with st.spinner(f"Generating Grad-CAM for {selected_layer}..."):
             try:
-                # Select transform
-                if transform_version == "v1 (Original)":
-                    transform = get_transform_v1(img_size)
-                elif transform_version == "v2 (No Lambda)":
-                    transform = get_transform_v2(img_size)
-                else:
-                    transform = get_transform_v3(img_size)
+                # Get data from session
+                input_tensor = st.session_state.last_prediction['input_tensor']
+                predicted_idx = st.session_state.last_prediction['predicted_idx']
+                image = st.session_state.last_prediction['image']
                 
-                with st.spinner("🔬 Analyzing image..."):
-                    predicted_idx, confidence, probabilities, input_tensor = predict_clean(
-                        st.session_state.model,
-                        image,
-                        transform,
-                        st.session_state.device
-                    )
+                # Convert original image to numpy
+                org_img = np.array(image.resize((img_size, img_size)))
                 
-                # Use checkpoint classes if available
-                display_classes = st.session_state.checkpoint_classes if st.session_state.checkpoint_classes else st.session_state.class_names
+                # Define target layers
+                layer_map = {
+                    "HybridCNN (Fusion)": st.session_state.model.head[0],
+                    "ResNet50 (Layer 4)": st.session_state.model.resnet.layer4[-1].conv3,
+                    "ResNet50 (Layer 3)": st.session_state.model.resnet.layer3[-1].conv3,
+                    "DenseNet121 (Block 4)": st.session_state.model.densenet.features.denseblock4.denselayer16.conv2,
+                    "DenseNet121 (Transition 3)": st.session_state.model.densenet.features.transition3.conv
+                }
                 
-                predicted_class = display_classes[predicted_idx]
+                target_layer = layer_map[selected_layer]
                 
-                # Main prediction
-                st.success(f"### 🎯 Predicted: **{predicted_class}**")
-                st.metric("Confidence", f"{confidence*100:.2f}%")
-                st.progress(confidence)
+                # Generate Grad-CAM
+                gradcam = GradCAM(st.session_state.model, target_layer)
+                cam = gradcam.generate_cam(input_tensor, predicted_idx)
                 
+                # Apply enhanced heatmap
+                gradcam_img, cam_thresholded = apply_enhanced_colormap(org_img, cam, threshold)
+                
+                # Calculate metrics
+                tumor_coverage = (cam_thresholded > 0).sum() / cam_thresholded.size * 100
+                max_intensity = cam_thresholded.max()
+                focus_score = (cam_thresholded > 0.7).sum() / (cam_thresholded > 0).sum() * 100 if (cam_thresholded > 0).sum() > 0 else 0
+                
+                # Display results
+                st.subheader(f"📍 {selected_layer} Visualization")
+                
+                # Two column display
+                vis_col1, vis_col2 = st.columns(2)
+                
+                with vis_col1:
+                    st.image(org_img, caption="Original MRI Scan", use_container_width=True)
+                
+                with vis_col2:
+                    st.image(gradcam_img, caption=f"Grad-CAM: {selected_layer}", use_container_width=True)
+                
+                # Metrics in columns
                 st.divider()
+                met_col1, met_col2, met_col3 = st.columns(3)
                 
-                # Top 5 table
-                st.subheader("📊 Top 5 Predictions")
+                with met_col1:
+                    st.metric("Coverage", f"{tumor_coverage:.1f}%", help="Percentage of image highlighted")
                 
-                probs_np = probabilities.numpy()
-                top5_indices = np.argsort(probs_np)[-5:][::-1]
+                with met_col2:
+                    st.metric("Max Intensity", f"{max_intensity:.2f}", help="Peak activation strength")
                 
-                top5_data = {
-                    'Rank': list(range(1, 6)),
-                    'Class': [display_classes[idx] for idx in top5_indices],
-                    'Probability': [f"{probs_np[idx]:.6f}" for idx in top5_indices],
-                    'Percentage': [f"{probs_np[idx]*100:.2f}%" for idx in top5_indices]
-                }
+                with met_col3:
+                    st.metric("Focus Score", f"{focus_score:.1f}%", help="Precision of localization")
                 
-                df = pd.DataFrame(top5_data)
-                st.table(df)
+                st.caption("🔴 **Red/Hot areas indicate regions that influenced the prediction** | Brighter colors = Higher confidence")
                 
-                # Store in session state for Grad-CAM
-                st.session_state.last_prediction = {
-                    'input_tensor': input_tensor,
-                    'predicted_idx': predicted_idx,
-                    'image': image,
-                    'display_classes': display_classes
-                }
+                # Layer explanation
+                with st.expander("ℹ️ About This Layer"):
+                    layer_info = {
+                        "HybridCNN (Fusion)": "Shows how the model combines ResNet50 and DenseNet121 features. Best for understanding the overall decision-making process.",
+                        "ResNet50 (Layer 4)": "Deepest ResNet layer with most abstract features. Captures high-level patterns and complex tumor characteristics.",
+                        "ResNet50 (Layer 3)": "Mid-level ResNet features. Good for detecting structural patterns and edges in the tumor.",
+                        "DenseNet121 (Block 4)": "Final DenseNet block with rich feature connections. Excellent for detailed texture analysis.",
+                        "DenseNet121 (Transition 3)": "DenseNet transition layer that refines features. Good for feature compression and efficiency."
+                    }
+                    st.markdown(f"**{selected_layer}**: {layer_info[selected_layer]}")
                 
             except Exception as e:
-                st.error(f"Error: {e}")
-                import traceback
+                st.error(f"Error generating Grad-CAM: {str(e)}")
                 st.code(traceback.format_exc())
-        elif not st.session_state.model:
-            st.warning("⚠️ Please load model first")
-        else:
-            st.info("👆 Upload an image to get started")
 
+# ----------------------------
+# Footer
+# ----------------------------
 st.divider()
+
+footer_col1, footer_col2, footer_col3, footer_col4 = st.columns(4)
+
+with footer_col1:
+    st.metric("Device", str(st.session_state.device).upper())
+
+with footer_col2:
+    if st.session_state.model_loaded:
+        st.metric("Status", "✅ Ready")
+    else:
+        st.metric("Status", "⏳ Waiting")
+
+with footer_col3:
+    if st.session_state.class_names:
+        st.metric("Classes", len(st.session_state.class_names))
+    else:
+        st.metric("Classes", "Not Loaded")
+
+with footer_col4:
+    if torch.cuda.is_available():
+        st.metric("CUDA", "✅ Available")
+    else:
+        st.metric("CUDA", "❌ Not Available")
+
 st.caption("HybridCNN - ResNet50 + DenseNet121 Fusion Architecture")
