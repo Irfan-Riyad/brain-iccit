@@ -121,6 +121,17 @@ def load_model_clean(model_file, num_classes):
 # ----------------------------
 # Exact Inference Transforms (Matching Training)
 # ----------------------------
+def get_inference_transform(img_size=224):
+    """
+    Returns transforms that exactly match validation/test transforms
+    """
+    return transforms.Compose([
+        transforms.Resize((img_size, img_size)),
+        transforms.ToTensor(),
+        transforms.Lambda(lambda t: t.expand(3, -1, -1) if t.shape[0] == 1 else t),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
 def get_transform_v1(img_size=224):
     """Original transform - exactly as training"""
     return transforms.Compose([
@@ -177,7 +188,7 @@ def predict_clean(model, image, transform, device):
     return predicted_idx.item(), confidence.item(), probabilities.cpu(), input_tensor
 
 # ----------------------------
-# Professional Grad-CAM Implementation
+# Enhanced Grad-CAM Implementation
 # ----------------------------
 class GradCAM:
     def __init__(self, model, target_layer):
@@ -210,147 +221,74 @@ class GradCAM:
         class_loss = output[0, class_idx]
         class_loss.backward()
         
-        # Generate CAM with enhanced processing
-        gradients = self.gradients[0].clone()
-        activations = self.activations[0].clone()
+        # Generate CAM
+        gradients = self.gradients[0].clone()  # Can be [C, H, W] or [C]
+        activations = self.activations[0].clone()  # Can be [C, H, W] or [C]
         
         # Check if we have spatial dimensions
         if gradients.dim() == 3:  # Convolutional layer [C, H, W]
-            # Use absolute gradients for better multi-region sensitivity
-            grad_abs = torch.abs(gradients)
+            # Grad-CAM++: Use positive gradients only for better localization
+            gradients = F.relu(gradients)
             
-            # Weighted average pooling with attention mechanism
-            # Give more weight to gradients with higher magnitude
-            grad_squared = grad_abs ** 2
-            grad_sum = grad_squared.sum(dim=(1, 2), keepdim=True)
-            alpha = grad_squared / (grad_sum + 1e-8)  # Normalize
+            # Global average pooling on gradients
+            weights = gradients.mean(dim=(1, 2))  # [C]
             
-            # Compute channel importance weights
-            weights = (alpha * gradients).sum(dim=(1, 2))
-            
-            # Weighted combination with ReLU on activations for positive influence
+            # Weighted combination of activation maps
             cam = torch.zeros(activations.shape[1:], device=activations.device)
             for i, w in enumerate(weights):
                 cam += w * activations[i]
             
-            # Apply ReLU
+            # Apply ReLU to focus on positive contributions
             cam = F.relu(cam)
             
-        elif gradients.dim() == 1:  # Fully connected layer
-            cam_size = 7
-            weights = torch.abs(gradients)
+        elif gradients.dim() == 1:  # Fully connected layer [C]
+            # For FC layers, we can't create spatial CAM
+            # Instead, return a uniform attention map weighted by gradient magnitude
+            cam_size = 7  # Create a 7x7 feature map
+            weights = F.relu(gradients)
             avg_weight = weights.mean()
             cam = torch.ones((cam_size, cam_size), device=activations.device) * avg_weight
+            
         else:
+            # Fallback: create uniform map
             cam = torch.ones((7, 7), device=activations.device) * 0.5
         
-        # Advanced normalization with outlier handling
-        cam_np = cam.cpu().numpy()
-        
-        # Remove extreme outliers before normalization
-        p5 = np.percentile(cam_np, 5)
-        p95 = np.percentile(cam_np, 95)
-        cam_np = np.clip(cam_np, p5, p95)
-        
         # Normalize
-        if cam_np.max() > cam_np.min():
-            cam_np = (cam_np - cam_np.min()) / (cam_np.max() - cam_np.min())
+        cam = cam - cam.min()
+        if cam.max() != 0:
+            cam = cam / cam.max()
         
-        return cam_np
+        return cam.cpu().numpy()
 
-def apply_enhanced_colormap(org_img, activation_map, threshold=0.3):
+def apply_enhanced_colormap(org_img, activation_map, threshold=0.5):
     """
-    Professional medical-grade tumor localization visualization
+    Apply enhanced heatmap with better tumor localization
     """
-    # Resize with high-quality interpolation
+    # Resize activation map to match image size
     h, w = org_img.shape[:2]
-    activation_map = cv2.resize(activation_map, (w, h), interpolation=cv2.INTER_LANCZOS4)
+    activation_map = cv2.resize(activation_map, (w, h))
     
-    # Advanced normalization using robust statistics
-    p1 = np.percentile(activation_map, 1)
-    p99 = np.percentile(activation_map, 99)
-    activation_map = np.clip(activation_map, p1, p99)
+    # Apply threshold to focus on high-activation regions (tumor areas)
+    activation_map_thresholded = np.where(activation_map > threshold, activation_map, 0)
     
-    if activation_map.max() > activation_map.min():
-        activation_map = (activation_map - activation_map.min()) / (activation_map.max() - activation_map.min())
+    # Normalize thresholded map
+    if activation_map_thresholded.max() > 0:
+        activation_map_thresholded = activation_map_thresholded / activation_map_thresholded.max()
     
-    # Apply bilateral filter for edge-preserving smoothing
-    activation_map = cv2.bilateralFilter(
-        (activation_map * 255).astype(np.uint8), 
-        d=9, 
-        sigmaColor=75, 
-        sigmaSpace=75
-    ).astype(np.float32) / 255.0
+    # Create heatmap with better color scheme for medical imaging
+    heatmap = cv2.applyColorMap(np.uint8(255 * activation_map_thresholded), cv2.COLORMAP_HOT)
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
     
-    # Threshold with hysteresis for better region connectivity
-    high_threshold = threshold + 0.1
-    low_threshold = threshold - 0.05
+    # Superimpose with higher transparency for clearer view
+    superimposed = heatmap * 0.5 + org_img * 0.5
+    superimposed = np.clip(superimposed, 0, 255).astype(np.uint8)
     
-    strong = activation_map >= high_threshold
-    weak = (activation_map >= low_threshold) & (activation_map < high_threshold)
+    # Apply slight sharpening to highlight tumor boundaries
+    kernel = np.array([[-1,-1,-1], [-1, 9,-1], [-1,-1,-1]])
+    superimposed = cv2.filter2D(superimposed, -1, kernel * 0.1)
+    superimposed = np.clip(superimposed, 0, 255).astype(np.uint8)
     
-    # Connect weak regions that are adjacent to strong regions
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    strong_dilated = cv2.dilate(strong.astype(np.uint8), kernel, iterations=1)
-    connected_weak = weak & (strong_dilated > 0)
-    
-    final_mask = strong | connected_weak
-    activation_masked = activation_map * final_mask
-    
-    # Morphological refinement
-    mask_uint8 = (activation_masked * 255).astype(np.uint8)
-    mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, kernel, iterations=2)
-    mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, 
-                                   cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), 
-                                   iterations=1)
-    
-    activation_final = mask_uint8.astype(np.float32) / 255.0
-    
-    # Create professional red-yellow heatmap
-    # Red for high confidence, yellow for medium, transparent for low
-    heatmap = np.zeros((h, w, 3), dtype=np.uint8)
-    
-    # Create intensity-based color gradient
-    intensity = activation_final
-    heatmap[:, :, 0] = np.clip(intensity * 255, 0, 255).astype(np.uint8)  # Red channel
-    heatmap[:, :, 1] = np.clip((intensity - 0.5) * 2 * 200, 0, 200).astype(np.uint8)  # Green for yellow tint
-    heatmap[:, :, 2] = 0  # No blue
-    
-    # Smart alpha blending - higher intensity = more visible
-    alpha = np.expand_dims(activation_final ** 0.7, axis=2) * 0.6  # Gamma correction for better visibility
-    
-    # Blend with original image
-    org_float = org_img.astype(np.float32)
-    heatmap_float = heatmap.astype(np.float32)
-    
-    # Enhanced blending for better contrast
-    blended = org_float * (1 - alpha) + heatmap_float * alpha
-    
-    # Subtle sharpening only on tumor regions for crisp boundaries
-    sharpening_kernel = np.array([[-0.5, -0.5, -0.5],
-                                   [-0.5,  5.0, -0.5],
-                                   [-0.5, -0.5, -0.5]])
-    
-    tumor_mask_3ch = np.repeat(np.expand_dims(activation_final > 0.1, axis=2), 3, axis=2)
-    sharpened = cv2.filter2D(blended, -1, sharpening_kernel)
-    
-    # Apply sharpening only to tumor regions
-    result = blended * (1 - tumor_mask_3ch) + sharpened * tumor_mask_3ch * 0.3 + blended * tumor_mask_3ch * 0.7
-    
-    # Final enhancement: local contrast adjustment
-    result_uint8 = np.clip(result, 0, 255).astype(np.uint8)
-    
-    # Apply CLAHE only to luminance channel for better local contrast
-    lab = cv2.cvtColor(result_uint8, cv2.COLOR_RGB2LAB)
-    l, a, b = cv2.split(lab)
-    
-    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
-    l_enhanced = clahe.apply(l)
-    
-    result_enhanced = cv2.merge([l_enhanced, a, b])
-    result_final = cv2.cvtColor(result_enhanced, cv2.COLOR_LAB2RGB)
-    
-    return result_final, activation_final
+    return superimposed, activation_map_thresholded
 
 # ----------------------------
 # Sidebar Configuration
@@ -533,12 +471,12 @@ if st.session_state.last_prediction:
     
     with col_config2:
         threshold = st.slider(
-            "Sensitivity",
-            min_value=0.15,
-            max_value=0.55,
-            value=0.30,
-            step=0.05,
-            help="Lower: More regions detected | Higher: Only strong detections"
+            "Attention Threshold",
+            min_value=0.0,
+            max_value=0.9,
+            value=0.5,
+            step=0.1,
+            help="Higher = More specific localization"
         )
     
     # Generate button
@@ -565,48 +503,77 @@ if st.session_state.last_prediction:
                 
                 # Calculate metrics
                 tumor_coverage = (cam_thresholded > 0).sum() / cam_thresholded.size * 100
+                max_intensity = cam_thresholded.max()
+                focus_score = (cam_thresholded > 0.7).sum() / (cam_thresholded > 0).sum() * 100 if (cam_thresholded > 0).sum() > 0 else 0
                 
-                # Region detection
-                cam_binary = (cam_thresholded > 0.1).astype(np.uint8)
-                num_regions, labeled_regions, stats, _ = cv2.connectedComponentsWithStats(cam_binary, connectivity=8)
+                # Display results
+                st.subheader(f"📍 {selected_layer} Visualization")
                 
-                # Filter significant regions (>1% of image)
-                min_size = (cam_binary.shape[0] * cam_binary.shape[1]) * 0.01
-                significant_regions = sum(1 for i in range(1, num_regions) if stats[i, cv2.CC_STAT_AREA] > min_size)
-                
-                # Display results with better layout
-                st.subheader(f"📍 Tumor Localization Results")
-                
-                # Two column display with better spacing
-                vis_col1, vis_col2 = st.columns(2, gap="medium")
+                # Two column display
+                vis_col1, vis_col2 = st.columns(2)
                 
                 with vis_col1:
                     st.image(org_img, caption="Original MRI Scan", use_container_width=True)
                 
                 with vis_col2:
-                    st.image(gradcam_img, caption="AI Tumor Detection", use_container_width=True)
+                    st.image(gradcam_img, caption=f"Grad-CAM: {selected_layer}", use_container_width=True)
                 
-                # Clean minimal display with professional styling
+                # Metrics in columns
                 st.divider()
+                met_col1, met_col2, met_col3 = st.columns(3)
                 
-                # Status with color coding
-                if significant_regions == 0:
-                    st.warning("⚠️ No significant tumor regions detected at current sensitivity")
-                elif significant_regions == 1:
-                    st.success("✓ **Single tumor region identified**")
-                    st.info(f"📊 Coverage: {tumor_coverage:.1f}% of scan area")
-                else:
-                    st.success(f"✓ **{significant_regions} distinct tumor regions identified**")
-                    st.info(f"📊 Total coverage: {tumor_coverage:.1f}% of scan area")
+                with met_col1:
+                    st.metric("Coverage", f"{tumor_coverage:.1f}%", help="Percentage of image highlighted")
                 
-                st.caption("🔴 Red-to-yellow gradient: Tumor confidence (Red = High, Yellow = Medium)")
+                with met_col2:
+                    st.metric("Max Intensity", f"{max_intensity:.2f}", help="Peak activation strength")
+                
+                with met_col3:
+                    st.metric("Focus Score", f"{focus_score:.1f}%", help="Precision of localization")
+                
+                st.caption("🔴 **Red/Hot areas indicate regions that influenced the prediction** | Brighter colors = Higher confidence")
+                
+                # Layer explanation
+                with st.expander("ℹ️ About HybridCNN Fusion"):
+                    st.markdown("""
+                    **HybridCNN (Fusion)** visualizes the combined features from both ResNet50 and DenseNet121 backbones.
+                    
+                    - Shows where the model focuses when combining both architectures
+                    - Leverages strengths of both ResNet (hierarchical features) and DenseNet (dense connections)
+                    - Best representation of the overall decision-making process
+                    - Red/hot regions indicate areas that most influenced the tumor classification
+                    """)
                 
             except Exception as e:
                 st.error(f"Error generating Grad-CAM: {str(e)}")
                 st.code(traceback.format_exc())
 
 # ----------------------------
-# Footer (Removed)
+# Footer
 # ----------------------------
 st.divider()
-st.caption("HybridCNN Brain Tumor Classifier")
+
+footer_col1, footer_col2, footer_col3, footer_col4 = st.columns(4)
+
+with footer_col1:
+    st.metric("Device", str(st.session_state.device).upper())
+
+with footer_col2:
+    if st.session_state.model_loaded:
+        st.metric("Status", "✅ Ready")
+    else:
+        st.metric("Status", "⏳ Waiting")
+
+with footer_col3:
+    if st.session_state.class_names:
+        st.metric("Classes", len(st.session_state.class_names))
+    else:
+        st.metric("Classes", "Not Loaded")
+
+with footer_col4:
+    if torch.cuda.is_available():
+        st.metric("CUDA", "✅ Available")
+    else:
+        st.metric("CUDA", "❌ Not Available")
+
+st.caption("HybridCNN - ResNet50 + DenseNet121 Fusion Architecture")
