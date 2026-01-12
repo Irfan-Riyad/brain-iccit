@@ -258,97 +258,45 @@ class GradCAM:
 
 def apply_enhanced_colormap(org_img, activation_map, threshold=0.3):
     """
-    Professional medical-grade tumor localization visualization
+    Clean, professional tumor localization visualization
     """
-    # Resize with high-quality interpolation
+    # Resize activation map to match image size
     h, w = org_img.shape[:2]
-    activation_map = cv2.resize(activation_map, (w, h), interpolation=cv2.INTER_LANCZOS4)
+    activation_map = cv2.resize(activation_map, (w, h), interpolation=cv2.INTER_CUBIC)
     
-    # Advanced normalization using robust statistics
-    p1 = np.percentile(activation_map, 1)
-    p99 = np.percentile(activation_map, 99)
-    activation_map = np.clip(activation_map, p1, p99)
+    # Normalize using percentile for robustness
+    p2 = np.percentile(activation_map, 2)
+    p98 = np.percentile(activation_map, 98)
+    activation_map = np.clip(activation_map, p2, p98)
     
     if activation_map.max() > activation_map.min():
         activation_map = (activation_map - activation_map.min()) / (activation_map.max() - activation_map.min())
     
-    # Apply bilateral filter for edge-preserving smoothing
-    activation_map = cv2.bilateralFilter(
-        (activation_map * 255).astype(np.uint8), 
-        d=9, 
-        sigmaColor=75, 
-        sigmaSpace=75
-    ).astype(np.float32) / 255.0
+    # Apply threshold - clean detection
+    activation_thresholded = np.where(activation_map > threshold, activation_map, 0)
     
-    # Threshold with hysteresis for better region connectivity
-    high_threshold = threshold + 0.1
-    low_threshold = threshold - 0.05
+    # Smooth for natural appearance
+    activation_thresholded = cv2.GaussianBlur(activation_thresholded, (7, 7), 2.0)
     
-    strong = activation_map >= high_threshold
-    weak = (activation_map >= low_threshold) & (activation_map < high_threshold)
+    # Morphological cleanup
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    activation_uint8 = (activation_thresholded * 255).astype(np.uint8)
+    activation_uint8 = cv2.morphologyEx(activation_uint8, cv2.MORPH_CLOSE, kernel, iterations=1)
+    activation_uint8 = cv2.morphologyEx(activation_uint8, cv2.MORPH_OPEN, kernel, iterations=1)
     
-    # Connect weak regions that are adjacent to strong regions
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    strong_dilated = cv2.dilate(strong.astype(np.uint8), kernel, iterations=1)
-    connected_weak = weak & (strong_dilated > 0)
+    activation_final = activation_uint8.astype(np.float32) / 255.0
     
-    final_mask = strong | connected_weak
-    activation_masked = activation_map * final_mask
+    # Simple, clean red heatmap overlay
+    # Create red channel overlay
+    heatmap = np.zeros_like(org_img)
+    heatmap[:, :, 0] = activation_uint8  # Red channel only
     
-    # Morphological refinement
-    mask_uint8 = (activation_masked * 255).astype(np.uint8)
-    mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, kernel, iterations=2)
-    mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, 
-                                   cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), 
-                                   iterations=1)
+    # Smooth blending with original image
+    alpha = np.expand_dims(activation_final, axis=2) * 0.5  # 50% transparency
+    superimposed = org_img.astype(np.float32) * (1 - alpha) + heatmap.astype(np.float32) * alpha
+    superimposed = np.clip(superimposed, 0, 255).astype(np.uint8)
     
-    activation_final = mask_uint8.astype(np.float32) / 255.0
-    
-    # Create professional red-yellow heatmap
-    # Red for high confidence, yellow for medium, transparent for low
-    heatmap = np.zeros((h, w, 3), dtype=np.uint8)
-    
-    # Create intensity-based color gradient
-    intensity = activation_final
-    heatmap[:, :, 0] = np.clip(intensity * 255, 0, 255).astype(np.uint8)  # Red channel
-    heatmap[:, :, 1] = np.clip((intensity - 0.5) * 2 * 200, 0, 200).astype(np.uint8)  # Green for yellow tint
-    heatmap[:, :, 2] = 0  # No blue
-    
-    # Smart alpha blending - higher intensity = more visible
-    alpha = np.expand_dims(activation_final ** 0.7, axis=2) * 0.6  # Gamma correction for better visibility
-    
-    # Blend with original image
-    org_float = org_img.astype(np.float32)
-    heatmap_float = heatmap.astype(np.float32)
-    
-    # Enhanced blending for better contrast
-    blended = org_float * (1 - alpha) + heatmap_float * alpha
-    
-    # Subtle sharpening only on tumor regions for crisp boundaries
-    sharpening_kernel = np.array([[-0.5, -0.5, -0.5],
-                                   [-0.5,  5.0, -0.5],
-                                   [-0.5, -0.5, -0.5]])
-    
-    tumor_mask_3ch = np.repeat(np.expand_dims(activation_final > 0.1, axis=2), 3, axis=2)
-    sharpened = cv2.filter2D(blended, -1, sharpening_kernel)
-    
-    # Apply sharpening only to tumor regions
-    result = blended * (1 - tumor_mask_3ch) + sharpened * tumor_mask_3ch * 0.3 + blended * tumor_mask_3ch * 0.7
-    
-    # Final enhancement: local contrast adjustment
-    result_uint8 = np.clip(result, 0, 255).astype(np.uint8)
-    
-    # Apply CLAHE only to luminance channel for better local contrast
-    lab = cv2.cvtColor(result_uint8, cv2.COLOR_RGB2LAB)
-    l, a, b = cv2.split(lab)
-    
-    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
-    l_enhanced = clahe.apply(l)
-    
-    result_enhanced = cv2.merge([l_enhanced, a, b])
-    result_final = cv2.cvtColor(result_enhanced, cv2.COLOR_LAB2RGB)
-    
-    return result_final, activation_final
+    return superimposed, activation_final
 
 # ----------------------------
 # Sidebar Configuration
@@ -584,15 +532,43 @@ if st.session_state.last_prediction:
                 with vis_col2:
                     st.image(gradcam_img, caption=f"Grad-CAM: {selected_layer}", use_container_width=True)
                 
-                # Clean minimal display
+                # Metrics - Simple and clean
                 st.divider()
+                met_col1, met_col2 = st.columns(2)
                 
+                with met_col1:
+                    st.metric("Detected Regions", f"{significant_regions}", 
+                             help="Number of tumor regions identified")
+                
+                with met_col2:
+                    st.metric("Tumor Coverage", f"{tumor_coverage:.1f}%", 
+                             help="Percentage of image with tumor activity")
+                
+                # Simple status message
                 if significant_regions == 0:
-                    st.info("No tumor regions detected")
+                    st.info("ℹ️ No significant tumor regions detected at this sensitivity level")
                 elif significant_regions == 1:
-                    st.success("✓ 1 tumor region detected")
+                    st.success("✓ Single tumor region identified")
                 else:
-                    st.success(f"✓ {significant_regions} tumor regions detected")
+                    st.success(f"✓ Multiple tumor regions identified: {significant_regions}")
+                
+                st.caption("🔴 Red overlay indicates tumor locations detected by the model")
+                
+                # Simple explanation
+                with st.expander("ℹ️ How to Read the Visualization"):
+                    st.markdown("""
+                    **Grad-CAM Tumor Detection**
+                    
+                    - **Red overlay**: Areas where the AI model detected tumor characteristics
+                    - **Brighter red**: Higher confidence tumor region
+                    - **No overlay**: Normal brain tissue
+                    
+                    **Adjusting Sensitivity:**
+                    - Lower (0.2-0.3): Detects more regions, including smaller tumors
+                    - Higher (0.4-0.5): Only shows high-confidence detections
+                    
+                    The visualization combines features from both ResNet50 and DenseNet121 networks for accurate tumor localization.
+                    """)
                 
                 
             except Exception as e:
@@ -600,7 +576,32 @@ if st.session_state.last_prediction:
                 st.code(traceback.format_exc())
 
 # ----------------------------
-# Footer (Removed)
+# Footer
 # ----------------------------
 st.divider()
-st.caption("HybridCNN Brain Tumor Classifier")
+
+footer_col1, footer_col2, footer_col3, footer_col4 = st.columns(4)
+
+with footer_col1:
+    st.metric("Device", str(st.session_state.device).upper())
+
+with footer_col2:
+    if st.session_state.model_loaded:
+        st.metric("Status", "✅ Ready")
+    else:
+        st.metric("Status", "⏳ Waiting")
+
+with footer_col3:
+    if st.session_state.class_names:
+        st.metric("Classes", len(st.session_state.class_names))
+    else:
+        st.metric("Classes", "Not Loaded")
+
+with footer_col4:
+    if torch.cuda.is_available():
+        st.metric("CUDA", "✅ Available")
+    else:
+        st.metric("CUDA", "❌ Not Available")
+
+st.caption("HybridCNN - ResNet50 + DenseNet121 Fusion Architecture")
+
