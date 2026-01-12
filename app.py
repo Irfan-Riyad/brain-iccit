@@ -4,19 +4,23 @@ import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
 import numpy as np
+import pandas as pd
 import cv2
 
-# ----------------------------
-# Page Config
-# ----------------------------
+# ============================
+# Page Configuration
+# ============================
 st.set_page_config(
-    page_title="Brain Tumor Classifier",
+    page_title="Brain Tumor Classification System",
     layout="wide"
 )
 
-# ----------------------------
+st.title("🧠 Brain Tumor Classification System")
+st.caption("HybridCNN (ResNet50 + DenseNet121)")
+
+# ============================
 # Session State
-# ----------------------------
+# ============================
 if "model" not in st.session_state:
     st.session_state.model = None
 if "class_names" not in st.session_state:
@@ -24,11 +28,13 @@ if "class_names" not in st.session_state:
 if "model_loaded" not in st.session_state:
     st.session_state.model_loaded = False
 if "device" not in st.session_state:
-    st.session_state.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    st.session_state.device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
 
-# ----------------------------
-# HybridCNN Definition
-# ----------------------------
+# ============================
+# HybridCNN Model
+# ============================
 class HybridCNN(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
@@ -38,7 +44,7 @@ class HybridCNN(nn.Module):
         self.densenet = models.densenet121(weights=None)
         self.densenet.classifier = nn.Identity()
 
-        self.head = nn.Sequential(
+        self.classifier = nn.Sequential(
             nn.Linear(2048 + 1024, 1024),
             nn.ReLU(inplace=False),
             nn.Dropout(0.5),
@@ -48,15 +54,15 @@ class HybridCNN(nn.Module):
     def forward(self, x):
         f1 = self.resnet(x)
         f2 = self.densenet(x)
-        return self.head(torch.cat([f1, f2], dim=1))
+        return self.classifier(torch.cat([f1, f2], dim=1))
 
-# ----------------------------
-# Load Model Automatically
-# ----------------------------
+# ============================
+# Load Model
+# ============================
 def load_model(model_file, num_classes):
     checkpoint = torch.load(model_file, map_location=st.session_state.device)
-
     model = HybridCNN(num_classes)
+
     if isinstance(checkpoint, dict):
         model.load_state_dict(checkpoint.get("state_dict", checkpoint))
     else:
@@ -66,40 +72,39 @@ def load_model(model_file, num_classes):
     model.eval()
     return model
 
-# ----------------------------
+# ============================
 # Transforms
-# ----------------------------
+# ============================
 def get_transform(img_size):
     return transforms.Compose([
         transforms.Resize((img_size, img_size)),
         transforms.ToTensor(),
         transforms.Lambda(lambda t: t.expand(3, -1, -1) if t.shape[0] == 1 else t),
         transforms.Normalize([0.485, 0.456, 0.406],
-                             [0.229, 0.224, 0.225]),
+                             [0.229, 0.224, 0.225])
     ])
 
-# ----------------------------
+# ============================
 # Prediction
-# ----------------------------
+# ============================
 @torch.no_grad()
 def predict(model, image, transform):
     x = transform(image).unsqueeze(0).to(st.session_state.device)
     logits = model(x)
     probs = torch.softmax(logits, dim=1)[0]
-    conf, idx = torch.max(probs, 0)
-    return idx.item(), conf.item(), x
+    return probs, x
 
-# ----------------------------
+# ============================
 # Grad-CAM
-# ----------------------------
+# ============================
 class GradCAM:
     def __init__(self, model, target_layer):
         self.gradients = None
         self.activations = None
+        self.model = model
 
         target_layer.register_forward_hook(self.save_activation)
         target_layer.register_full_backward_hook(self.save_gradient)
-        self.model = model
 
     def save_activation(self, m, i, o):
         self.activations = o.detach()
@@ -109,13 +114,14 @@ class GradCAM:
 
     def generate(self, x, class_idx):
         x = x.clone().requires_grad_(True)
-        out = self.model(x)
+        output = self.model(x)
         self.model.zero_grad()
-        out[0, class_idx].backward()
+        output[0, class_idx].backward()
 
-        g = torch.abs(self.gradients[0]).mean(dim=(1, 2))
-        cam = torch.zeros(self.activations.shape[2:], device=g.device)
-        for i, w in enumerate(g):
+        weights = torch.abs(self.gradients[0]).mean(dim=(1, 2))
+        cam = torch.zeros(self.activations.shape[2:], device=weights.device)
+
+        for i, w in enumerate(weights):
             cam += w * self.activations[0][i]
 
         cam = cam.cpu().numpy()
@@ -130,58 +136,78 @@ def overlay_cam(img, cam):
     alpha = np.expand_dims(cam * 0.5, axis=2)
     return np.clip(img * (1 - alpha) + heatmap * alpha, 0, 255).astype(np.uint8)
 
-# ----------------------------
-# Sidebar
-# ----------------------------
-st.sidebar.header("Configuration")
+# ============================
+# Sidebar (Clean)
+# ============================
+st.sidebar.header("Model Configuration")
 
-model_file = st.sidebar.file_uploader("Model (.pth)", type=["pth", "pt"])
-classes_file = st.sidebar.file_uploader("Classes (.txt)", type=["txt"])
-img_size = st.sidebar.number_input("Image Size", 128, 512, 224, 32)
+model_file = st.sidebar.file_uploader("Upload Model (.pth)", type=["pth", "pt"])
+classes_file = st.sidebar.file_uploader("Upload Classes (.txt)", type=["txt"])
+img_size = st.sidebar.number_input("Input Image Size", 128, 512, 224, 32)
 
-# ----------------------------
+# ============================
 # Auto Load Model
-# ----------------------------
+# ============================
 if model_file and classes_file and not st.session_state.model_loaded:
     classes = [c.strip() for c in classes_file.read().decode().splitlines() if c.strip()]
     st.session_state.class_names = classes
     st.session_state.model = load_model(model_file, len(classes))
     st.session_state.model_loaded = True
 
-# ----------------------------
-# Main UI
-# ----------------------------
+# ============================
+# Main Area
+# ============================
 uploaded_image = st.file_uploader(
-    "Upload Brain MRI",
+    "Upload Brain MRI Image",
     type=["png", "jpg", "jpeg", "bmp", "tiff"]
 )
 
 if uploaded_image and st.session_state.model_loaded:
     image = Image.open(uploaded_image).convert("RGB")
 
-    transform = get_transform(img_size)
-    idx, confidence, input_tensor = predict(
-        st.session_state.model, image, transform
+    probs, input_tensor = predict(
+        st.session_state.model,
+        image,
+        get_transform(img_size)
     )
 
-    class_name = st.session_state.class_names[idx]
+    probs_np = probs.cpu().numpy()
+    top5_idx = np.argsort(probs_np)[-5:][::-1]
+
+    pred_idx = top5_idx[0]
+    pred_class = st.session_state.class_names[pred_idx]
+    confidence = probs_np[pred_idx]
 
     # Grad-CAM
     target_layer = st.session_state.model.resnet.layer4[-1].conv3
     cam = GradCAM(st.session_state.model, target_layer).generate(
-        input_tensor, idx
+        input_tensor, pred_idx
     )
 
     img_np = np.array(image.resize((img_size, img_size)))
     cam_img = overlay_cam(img_np, cam)
 
-    col1, col2 = st.columns(2)
+    # ============================
+    # Layout
+    # ============================
+    col1, col2 = st.columns([1, 1.2])
 
     with col1:
+        st.subheader("Input MRI")
         st.image(image, use_container_width=True)
 
     with col2:
-        st.markdown(f"### **{class_name}**")
-        st.progress(confidence)
-        st.caption(f"{confidence*100:.2f}% confidence")
-        st.image(cam_img, use_container_width=True)
+        st.subheader("Prediction Result")
+        st.markdown(f"### **{pred_class}**")
+        st.progress(float(confidence))
+        st.caption(f"Confidence: {confidence * 100:.2f}%")
+
+        df = pd.DataFrame({
+            "Class": [st.session_state.class_names[i] for i in top5_idx],
+            "Probability (%)": [f"{probs_np[i] * 100:.2f}" for i in top5_idx]
+        })
+        st.table(df)
+
+    st.divider()
+    st.subheader("Tumor Localization (Grad-CAM)")
+    st.image(cam_img, use_container_width=True)
