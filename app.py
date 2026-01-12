@@ -258,76 +258,43 @@ class GradCAM:
 
 def apply_enhanced_colormap(org_img, activation_map, threshold=0.3):
     """
-    Advanced multi-region tumor localization with adaptive processing
+    Clean, professional tumor localization visualization
     """
-    # Resize activation map to match image size using better interpolation
+    # Resize activation map to match image size
     h, w = org_img.shape[:2]
     activation_map = cv2.resize(activation_map, (w, h), interpolation=cv2.INTER_CUBIC)
     
-    # Normalize activation map using robust statistics
-    # This preserves multiple peaks better than simple normalization
-    p5 = np.percentile(activation_map, 5)
-    p95 = np.percentile(activation_map, 95)
-    activation_map = np.clip(activation_map, p5, p95)
+    # Normalize using percentile for robustness
+    p2 = np.percentile(activation_map, 2)
+    p98 = np.percentile(activation_map, 98)
+    activation_map = np.clip(activation_map, p2, p98)
     
     if activation_map.max() > activation_map.min():
         activation_map = (activation_map - activation_map.min()) / (activation_map.max() - activation_map.min())
     
-    # Apply Gaussian smoothing for better region connectivity
-    activation_map = cv2.GaussianBlur(activation_map, (5, 5), 1.0)
+    # Apply threshold - clean detection
+    activation_thresholded = np.where(activation_map > threshold, activation_map, 0)
     
-    # Multi-level thresholding for better multi-region detection
-    # This creates multiple levels of activation
-    strong_regions = activation_map > (threshold + 0.2)  # Very strong
-    medium_regions = (activation_map > threshold) & ~strong_regions  # Medium
-    weak_regions = (activation_map > (threshold - 0.1)) & ~medium_regions & ~strong_regions  # Weak
+    # Smooth for natural appearance
+    activation_thresholded = cv2.GaussianBlur(activation_thresholded, (7, 7), 2.0)
     
-    # Create multi-level activation map
-    activation_multilevel = np.zeros_like(activation_map)
-    activation_multilevel[strong_regions] = 1.0
-    activation_multilevel[medium_regions] = 0.7
-    activation_multilevel[weak_regions] = 0.4
-    
-    # Apply original intensities to regions
-    activation_weighted = activation_multilevel * activation_map
-    
-    # Morphological operations to refine regions
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    activation_uint8 = (activation_weighted * 255).astype(np.uint8)
-    
-    # Close small gaps
-    activation_uint8 = cv2.morphologyEx(activation_uint8, cv2.MORPH_CLOSE, kernel, iterations=2)
-    
-    # Remove small noise
+    # Morphological cleanup
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    activation_uint8 = (activation_thresholded * 255).astype(np.uint8)
+    activation_uint8 = cv2.morphologyEx(activation_uint8, cv2.MORPH_CLOSE, kernel, iterations=1)
     activation_uint8 = cv2.morphologyEx(activation_uint8, cv2.MORPH_OPEN, kernel, iterations=1)
     
-    # Convert back to float
     activation_final = activation_uint8.astype(np.float32) / 255.0
     
-    # Create enhanced heatmap with JET colormap for better multi-region visibility
-    heatmap = cv2.applyColorMap(activation_uint8, cv2.COLORMAP_JET)
-    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+    # Simple, clean red heatmap overlay
+    # Create red channel overlay
+    heatmap = np.zeros_like(org_img)
+    heatmap[:, :, 0] = activation_uint8  # Red channel only
     
-    # Adaptive blending based on intensity
-    # Strong regions more visible
-    alpha = np.expand_dims(activation_final * 0.7, axis=2)
-    superimposed = heatmap * alpha + org_img * (1 - alpha)
+    # Smooth blending with original image
+    alpha = np.expand_dims(activation_final, axis=2) * 0.5  # 50% transparency
+    superimposed = org_img.astype(np.float32) * (1 - alpha) + heatmap.astype(np.float32) * alpha
     superimposed = np.clip(superimposed, 0, 255).astype(np.uint8)
-    
-    # Enhanced edge detection for tumor boundaries
-    edges = cv2.Canny(activation_uint8, 30, 100)
-    edges_dilated = cv2.dilate(edges, np.ones((2,2), np.uint8), iterations=1)
-    
-    # Overlay edges in white for clear boundaries
-    superimposed[edges_dilated > 0] = [255, 255, 255]
-    
-    # Apply adaptive histogram equalization for better visibility
-    lab = cv2.cvtColor(superimposed, cv2.COLOR_RGB2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    l = clahe.apply(l)
-    enhanced = cv2.merge([l, a, b])
-    superimposed = cv2.cvtColor(enhanced, cv2.COLOR_LAB2RGB)
     
     return superimposed, activation_final
 
@@ -512,12 +479,12 @@ if st.session_state.last_prediction:
     
     with col_config2:
         threshold = st.slider(
-            "Detection Sensitivity",
-            min_value=0.1,
-            max_value=0.7,
-            value=0.25,
+            "Sensitivity",
+            min_value=0.2,
+            max_value=0.6,
+            value=0.35,
             step=0.05,
-            help="Lower = More sensitive (detects smaller tumors) | Higher = Less sensitive (only large/clear tumors)"
+            help="Adjust detection sensitivity"
         )
     
     # Generate button
@@ -542,33 +509,16 @@ if st.session_state.last_prediction:
                 # Apply enhanced heatmap
                 gradcam_img, cam_thresholded = apply_enhanced_colormap(org_img, cam, threshold)
                 
-                # Calculate advanced metrics
+                # Calculate metrics
                 tumor_coverage = (cam_thresholded > 0).sum() / cam_thresholded.size * 100
-                max_intensity = cam_thresholded.max()
-                mean_intensity = cam_thresholded[cam_thresholded > 0].mean() if (cam_thresholded > 0).sum() > 0 else 0
                 
-                # Advanced region detection with size filtering
+                # Region detection
                 cam_binary = (cam_thresholded > 0.1).astype(np.uint8)
-                num_regions, labeled_regions, stats, centroids = cv2.connectedComponentsWithStats(cam_binary, connectivity=8)
+                num_regions, labeled_regions, stats, _ = cv2.connectedComponentsWithStats(cam_binary, connectivity=8)
                 
-                # Filter out small noise regions (less than 1% of image)
+                # Filter significant regions (>1% of image)
                 min_size = (cam_binary.shape[0] * cam_binary.shape[1]) * 0.01
-                significant_regions = []
-                region_sizes = []
-                
-                for i in range(1, num_regions):  # Skip background (0)
-                    area = stats[i, cv2.CC_STAT_AREA]
-                    if area > min_size:
-                        significant_regions.append(i)
-                        region_sizes.append(area)
-                
-                num_significant_regions = len(significant_regions)
-                
-                # Calculate region distribution
-                if num_significant_regions > 0:
-                    largest_region_pct = (max(region_sizes) / sum(region_sizes) * 100) if sum(region_sizes) > 0 else 0
-                else:
-                    largest_region_pct = 0
+                significant_regions = sum(1 for i in range(1, num_regions) if stats[i, cv2.CC_STAT_AREA] > min_size)
                 
                 # Display results
                 st.subheader(f"📍 {selected_layer} Visualization")
@@ -582,83 +532,42 @@ if st.session_state.last_prediction:
                 with vis_col2:
                     st.image(gradcam_img, caption=f"Grad-CAM: {selected_layer}", use_container_width=True)
                 
-                # Metrics in columns
+                # Metrics - Simple and clean
                 st.divider()
-                met_col1, met_col2, met_col3, met_col4 = st.columns(4)
+                met_col1, met_col2 = st.columns(2)
                 
                 with met_col1:
-                    st.metric("Tumor Regions", f"{num_significant_regions}", 
-                             help="Number of distinct significant tumor regions (>1% of image)")
+                    st.metric("Detected Regions", f"{significant_regions}", 
+                             help="Number of tumor regions identified")
                 
                 with met_col2:
-                    st.metric("Coverage", f"{tumor_coverage:.1f}%", 
-                             help="Total percentage of image showing tumor activity")
+                    st.metric("Tumor Coverage", f"{tumor_coverage:.1f}%", 
+                             help="Percentage of image with tumor activity")
                 
-                with met_col3:
-                    st.metric("Peak Intensity", f"{max_intensity:.2f}", 
-                             help="Strongest activation point")
-                
-                with met_col4:
-                    st.metric("Avg Intensity", f"{mean_intensity:.2f}", 
-                             help="Average activation in tumor regions")
-                
-                # Detailed region analysis
-                st.divider()
-                
-                if num_significant_regions == 0:
-                    st.warning("⚠️ **No significant tumor regions detected.** Try lowering sensitivity threshold to 0.15-0.20")
-                elif num_significant_regions == 1:
-                    st.success("✅ **Single tumor region detected.** Model identified one primary tumor location.")
-                elif num_significant_regions == 2:
-                    st.info(f"🔍 **Two tumor regions detected!** Largest region: {largest_region_pct:.1f}% of total tumor area.")
+                # Simple status message
+                if significant_regions == 0:
+                    st.info("ℹ️ No significant tumor regions detected at this sensitivity level")
+                elif significant_regions == 1:
+                    st.success("✓ Single tumor region identified")
                 else:
-                    st.info(f"🔍 **Multiple tumor regions detected: {num_significant_regions}** | Largest region: {largest_region_pct:.1f}% of total")
-                    st.markdown("**Region Size Distribution:**")
-                    
-                    # Show top 5 largest regions
-                    sorted_regions = sorted(enumerate(region_sizes, 1), key=lambda x: x[1], reverse=True)[:5]
-                    for idx, (region_num, size) in enumerate(sorted_regions, 1):
-                        pct = (size / sum(region_sizes) * 100)
-                        st.write(f"  {idx}. Region {region_num}: {pct:.1f}% of tumor area")
+                    st.success(f"✓ Multiple tumor regions identified: {significant_regions}")
                 
-                st.caption("🎨 **Color Guide:** Blue/Green = Weak activation | Yellow/Orange = Medium | Red = Strong | White edges = Tumor boundaries")
+                st.caption("🔴 Red overlay indicates tumor locations detected by the model")
                 
-                # Layer explanation
-                with st.expander("ℹ️ Advanced Multi-Tumor Detection System"):
+                # Simple explanation
+                with st.expander("ℹ️ How to Read the Visualization"):
                     st.markdown("""
-                    ### 🎯 Enhanced Detection Features:
+                    **Grad-CAM Tumor Detection**
                     
-                    **Multi-Level Thresholding:**
-                    - Strong regions (red): High confidence tumor areas
-                    - Medium regions (yellow/orange): Moderate confidence
-                    - Weak regions (blue/green): Low confidence, potential small tumors
+                    - **Red overlay**: Areas where the AI model detected tumor characteristics
+                    - **Brighter red**: Higher confidence tumor region
+                    - **No overlay**: Normal brain tissue
                     
-                    **Advanced Processing:**
-                    - ✅ Percentile-based normalization preserves multiple activation peaks
-                    - ✅ Gaussian smoothing for better region connectivity  
-                    - ✅ Morphological operations to merge nearby tumor regions
-                    - ✅ Size filtering removes noise (regions < 1% of image)
-                    - ✅ Edge detection highlights tumor boundaries in white
-                    - ✅ CLAHE enhancement for better visibility
+                    **Adjusting Sensitivity:**
+                    - Lower (0.2-0.3): Detects more regions, including smaller tumors
+                    - Higher (0.4-0.5): Only shows high-confidence detections
                     
-                    **Region Analysis:**
-                    - Connected component analysis identifies distinct regions
-                    - Size distribution shows relative tumor sizes
-                    - Filters out small artifacts and noise
-                    
-                    ### 🔧 Sensitivity Guide:
-                    - **0.10-0.20**: Maximum sensitivity - detects all possible regions including small tumors
-                    - **0.20-0.30**: High sensitivity - good balance for multiple tumors (recommended)
-                    - **0.30-0.40**: Medium sensitivity - focuses on clearer tumors
-                    - **0.40-0.50**: Low sensitivity - only large, obvious tumors
-                    - **0.50+**: Very selective - single dominant tumor only
-                    
-                    ### 💡 Usage Tips:
-                    - Start at 0.25 for balanced detection
-                    - Lower to 0.15-0.20 if you expect multiple small tumors
-                    - Increase to 0.35-0.40 to reduce false positives
-                    - White boundaries show exact tumor edges
-                    - Check "Region Size Distribution" for detailed analysis
+                    The visualization combines features from both ResNet50 and DenseNet121 networks for accurate tumor localization.
                     """)
                 
                 
