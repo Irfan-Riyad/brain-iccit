@@ -169,7 +169,7 @@ if model_file and classes_file and not st.session_state.model_loaded:
     st.session_state.model_loaded = True
 
 # ============================
-# Main UI
+# Main Content
 # ============================
 uploaded_image = st.file_uploader(
     "Upload Brain MRI Image",
@@ -192,7 +192,33 @@ if uploaded_image and st.session_state.model_loaded:
     pred_class = st.session_state.class_names[pred_idx]
     confidence = probs_np[pred_idx]
 
-    # Grad-CAM
+    # ============================
+    # TOP SECTION (UNCHANGED)
+    # ============================
+    col1, col2 = st.columns([1, 1.2])
+
+    with col1:
+        st.subheader("Input MRI")
+        st.image(image, use_container_width=True)
+
+    with col2:
+        st.subheader("Prediction Result")
+        st.markdown(f"### **{pred_class}**")
+        st.progress(float(confidence))
+        st.caption(f"Confidence: {confidence * 100:.2f}%")
+
+        df = pd.DataFrame({
+            "Class": [st.session_state.class_names[i] for i in top5_idx],
+            "Probability (%)": [f"{probs_np[i] * 100:.2f}" for i in top5_idx]
+        })
+        st.table(df)
+
+    # ============================
+    # GRAD-CAM BELOW
+    # ============================
+    st.divider()
+    st.subheader("Tumor Localization (Grad-CAM)")
+
     target_layer = st.session_state.model.resnet.layer4[-1].conv3
     cam = GradCAM(st.session_state.model, target_layer).generate(
         input_tensor, pred_idx
@@ -201,28 +227,10 @@ if uploaded_image and st.session_state.model_loaded:
     img_np = np.array(image.resize((img_size, img_size)))
     cam_img = overlay_cam(img_np, cam, cam_threshold)
 
-    # ============================
-    # Layout
-    # ============================
-    col1, col2 = st.columns(2)
+    gc_col1, gc_col2 = st.columns(2)
 
-    with col1:
-        st.subheader("Original MRI")
-        st.image(image, use_container_width=True)
+    with gc_col1:
+        st.image(img_np, caption="Original MRI", use_container_width=True)
 
-    with col2:
-        st.subheader("Grad-CAM Localization")
-        st.image(cam_img, use_container_width=True)
-
-    st.divider()
-
-    st.subheader("Prediction Results")
-    st.markdown(f"### **{pred_class}**")
-    st.progress(float(confidence))
-    st.caption(f"Confidence: {confidence * 100:.2f}%")
-
-    df = pd.DataFrame({
-        "Class": [st.session_state.class_names[i] for i in top5_idx],
-        "Probability (%)": [f"{probs_np[i] * 100:.2f}" for i in top5_idx]
-    })
-    st.table(df)
+    with gc_col2:
+        st.image(cam_img, caption="Grad-CAM Overlay", use_container_width=True)
