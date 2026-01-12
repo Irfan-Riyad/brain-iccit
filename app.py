@@ -9,7 +9,7 @@ import cv2
 import traceback
 
 # -------------------------------------------------
-# Page Configuration
+# Page Config
 # -------------------------------------------------
 st.set_page_config(
     page_title="Brain Tumor Classification System",
@@ -20,40 +20,47 @@ st.set_page_config(
 st.title("Brain Tumor Classification & Localization")
 
 # -------------------------------------------------
-# Session State
+# Device
+# -------------------------------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# -------------------------------------------------
+# Session State Init
 # -------------------------------------------------
 for key in [
-    "model", "class_names", "model_loaded",
-    "checkpoint_classes", "last_prediction"
+    "model",
+    "class_names",
+    "checkpoint_classes",
+    "model_loaded",
+    "last_prediction",
 ]:
     if key not in st.session_state:
         st.session_state[key] = None
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 # -------------------------------------------------
-# Model Definition
+# HybridCNN Model
 # -------------------------------------------------
 class HybridCNN(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
+
         self.resnet = models.resnet50(weights=None)
         self.resnet.fc = nn.Identity()
 
         self.densenet = models.densenet121(weights=None)
         self.densenet.classifier = nn.Identity()
 
-        self.classifier = nn.Sequential(
+        self.head = nn.Sequential(
             nn.Linear(2048 + 1024, 1024),
             nn.ReLU(inplace=False),
             nn.Dropout(0.5),
-            nn.Linear(1024, num_classes)
+            nn.Linear(1024, num_classes),
         )
 
     def forward(self, x):
         f1 = self.resnet(x)
         f2 = self.densenet(x)
-        return self.classifier(torch.cat([f1, f2], dim=1))
+        return self.head(torch.cat([f1, f2], dim=1))
 
 # -------------------------------------------------
 # Utilities
@@ -69,7 +76,7 @@ def get_transform(img_size):
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225]
-        )
+        ),
     ])
 
 @torch.no_grad()
@@ -77,8 +84,7 @@ def predict(model, image, transform):
     tensor = transform(image).unsqueeze(0).to(device)
     logits = model(tensor)
     probs = torch.softmax(logits, dim=1)[0]
-    idx = probs.argmax().item()
-    return idx, probs[idx].item(), probs.cpu(), tensor
+    return probs, tensor
 
 # -------------------------------------------------
 # Grad-CAM
@@ -104,12 +110,12 @@ class GradCAM:
         self.model.zero_grad()
         out[0, class_idx].backward()
 
-        g = torch.abs(self.gradients[0])
-        w = g.mean(dim=(1, 2))
+        grads = torch.abs(self.gradients[0])
+        weights = grads.mean(dim=(1, 2))
         cam = torch.zeros(self.activations.shape[2:], device=x.device)
 
-        for i, wi in enumerate(w):
-            cam += wi * self.activations[0, i]
+        for i, w in enumerate(weights):
+            cam += w * self.activations[0, i]
 
         cam = cam.cpu().numpy()
         cam -= cam.min()
@@ -130,10 +136,10 @@ st.sidebar.header("Model Configuration")
 
 model_file = st.sidebar.file_uploader("Model (.pth)", ["pth", "pt"])
 classes_file = st.sidebar.file_uploader("Classes (.txt)", ["txt"])
-img_size = st.sidebar.selectbox("Input Size", [224, 256, 384])
+img_size = st.sidebar.selectbox("Input Image Size", [224, 256, 384], index=0)
 
 # -------------------------------------------------
-# Auto Model Loading
+# Auto Model Load
 # -------------------------------------------------
 if model_file and classes_file:
     try:
@@ -141,6 +147,7 @@ if model_file and classes_file:
         checkpoint = torch.load(model_file, map_location=device)
 
         model = HybridCNN(len(classes))
+
         if isinstance(checkpoint, dict):
             model.load_state_dict(
                 checkpoint.get("state_dict", checkpoint),
@@ -150,25 +157,26 @@ if model_file and classes_file:
                 st.session_state.checkpoint_classes = checkpoint["classes"]
 
         model.to(device).eval()
+
         st.session_state.model = model
         st.session_state.class_names = classes
         st.session_state.model_loaded = True
 
         st.sidebar.success("Model loaded successfully")
 
-    except Exception as e:
+    except Exception:
         st.sidebar.error("Model loading failed")
         st.sidebar.code(traceback.format_exc())
 
 # -------------------------------------------------
-# Main Layout
+# Main UI
 # -------------------------------------------------
-left, right = st.columns([1, 1])
+col1, col2 = st.columns(2)
 
-with left:
-    st.subheader("MRI Scan")
+with col1:
+    st.subheader("MRI Image")
     uploaded_image = st.file_uploader(
-        "Upload MRI Image",
+        "Upload Brain MRI",
         ["jpg", "png", "jpeg", "bmp"]
     )
 
@@ -176,52 +184,70 @@ with left:
         image = Image.open(uploaded_image).convert("RGB")
         st.image(image, use_container_width=True)
 
-with right:
-    st.subheader("Prediction")
+with col2:
+    st.subheader("Prediction Results")
 
     if uploaded_image and st.session_state.model_loaded:
         transform = get_transform(img_size)
-        idx, conf, probs, tensor = predict(
+        probs, tensor = predict(
             st.session_state.model, image, transform
         )
 
-        names = (
+        class_names = (
             st.session_state.checkpoint_classes
             or st.session_state.class_names
         )
 
-        st.metric("Predicted Class", names[idx])
-        st.metric("Confidence", f"{conf*100:.2f}%")
+        # ---------------- TOP-5 ----------------
+        probs_np = probs.cpu().numpy()
+        top5_idx = np.argsort(probs_np)[-5:][::-1]
 
-        df = pd.DataFrame({
-            "Class": names,
-            "Probability": probs.numpy()
-        }).sort_values("Probability", ascending=False).head(5)
+        top5_df = pd.DataFrame({
+            "Rank": range(1, 6),
+            "Class": [class_names[i] for i in top5_idx],
+            "Probability": probs_np[top5_idx],
+            "Confidence (%)": [f"{p*100:.2f}" for p in probs_np[top5_idx]]
+        })
 
-        st.table(df)
+        pred_idx = top5_idx[0]
 
-        st.session_state.last_prediction = (tensor, idx, image)
+        st.metric("Predicted Class", class_names[pred_idx])
+        st.metric("Confidence", f"{probs_np[pred_idx]*100:.2f}%")
+
+        st.subheader("Top-5 Predictions")
+        st.table(top5_df)
+
+        # Save safely for Grad-CAM
+        st.session_state.last_prediction = {
+            "tensor": tensor,
+            "predicted_idx": pred_idx,
+            "image": image
+        }
 
 # -------------------------------------------------
-# Grad-CAM (Auto)
+# Grad-CAM
 # -------------------------------------------------
-if st.session_state.last_prediction:
+if isinstance(st.session_state.last_prediction, dict):
     st.divider()
     st.subheader("Tumor Localization (Grad-CAM)")
 
-    tensor, idx, image = st.session_state.last_prediction
-    cam_gen = GradCAM(
+    pred = st.session_state.last_prediction
+    tensor = pred["tensor"]
+    idx = pred["predicted_idx"]
+    image = pred["image"]
+
+    cam_engine = GradCAM(
         st.session_state.model,
         st.session_state.model.resnet.layer4[-1].conv3
     )
 
-    cam = cam_gen.generate(tensor, idx)
+    cam = cam_engine.generate(tensor, idx)
     img_np = np.array(image.resize((img_size, img_size)))
     cam_img = overlay_heatmap(img_np, cam)
 
     c1, c2 = st.columns(2)
     c1.image(img_np, caption="Original MRI", use_container_width=True)
-    c2.image(cam_img, caption="Tumor Localization", use_container_width=True)
+    c2.image(cam_img, caption="Grad-CAM Tumor Regions", use_container_width=True)
 
 # -------------------------------------------------
 # Footer
