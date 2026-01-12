@@ -8,7 +8,7 @@ import pandas as pd
 import cv2
 
 # ============================
-# Page Configuration
+# Page Config
 # ============================
 st.set_page_config(
     page_title="Brain Tumor Classification System",
@@ -16,7 +16,7 @@ st.set_page_config(
 )
 
 st.title("🧠 Brain Tumor Classification System")
-st.caption("HybridCNN (ResNet50 + DenseNet121)")
+st.caption("HybridCNN — ResNet50 + DenseNet121 with Grad-CAM")
 
 # ============================
 # Session State
@@ -33,7 +33,7 @@ if "device" not in st.session_state:
     )
 
 # ============================
-# HybridCNN Model
+# HybridCNN
 # ============================
 class HybridCNN(nn.Module):
     def __init__(self, num_classes):
@@ -44,7 +44,7 @@ class HybridCNN(nn.Module):
         self.densenet = models.densenet121(weights=None)
         self.densenet.classifier = nn.Identity()
 
-        self.classifier = nn.Sequential(
+        self.head = nn.Sequential(
             nn.Linear(2048 + 1024, 1024),
             nn.ReLU(inplace=False),
             nn.Dropout(0.5),
@@ -54,7 +54,7 @@ class HybridCNN(nn.Module):
     def forward(self, x):
         f1 = self.resnet(x)
         f2 = self.densenet(x)
-        return self.classifier(torch.cat([f1, f2], dim=1))
+        return self.head(torch.cat([f1, f2], dim=1))
 
 # ============================
 # Load Model
@@ -73,7 +73,7 @@ def load_model(model_file, num_classes):
     return model
 
 # ============================
-# Transforms
+# Transform
 # ============================
 def get_transform(img_size):
     return transforms.Compose([
@@ -81,7 +81,7 @@ def get_transform(img_size):
         transforms.ToTensor(),
         transforms.Lambda(lambda t: t.expand(3, -1, -1) if t.shape[0] == 1 else t),
         transforms.Normalize([0.485, 0.456, 0.406],
-                             [0.229, 0.224, 0.225])
+                             [0.229, 0.224, 0.225]),
     ])
 
 # ============================
@@ -103,13 +103,13 @@ class GradCAM:
         self.activations = None
         self.model = model
 
-        target_layer.register_forward_hook(self.save_activation)
-        target_layer.register_full_backward_hook(self.save_gradient)
+        target_layer.register_forward_hook(self._save_activation)
+        target_layer.register_full_backward_hook(self._save_gradient)
 
-    def save_activation(self, m, i, o):
+    def _save_activation(self, m, i, o):
         self.activations = o.detach()
 
-    def save_gradient(self, m, gi, go):
+    def _save_gradient(self, m, gi, go):
         self.gradients = go[0].detach()
 
     def generate(self, x, class_idx):
@@ -128,22 +128,36 @@ class GradCAM:
         cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
         return cam
 
-def overlay_cam(img, cam):
+def overlay_cam(img, cam, threshold):
     h, w = img.shape[:2]
     cam = cv2.resize(cam, (w, h))
+    cam = np.where(cam > threshold, cam, 0)
+
     heatmap = np.zeros_like(img)
     heatmap[:, :, 0] = (cam * 255).astype(np.uint8)
+
     alpha = np.expand_dims(cam * 0.5, axis=2)
     return np.clip(img * (1 - alpha) + heatmap * alpha, 0, 255).astype(np.uint8)
 
 # ============================
-# Sidebar (Clean)
+# Sidebar
 # ============================
-st.sidebar.header("Model Configuration")
+st.sidebar.header("Configuration")
 
-model_file = st.sidebar.file_uploader("Upload Model (.pth)", type=["pth", "pt"])
-classes_file = st.sidebar.file_uploader("Upload Classes (.txt)", type=["txt"])
-img_size = st.sidebar.number_input("Input Image Size", 128, 512, 224, 32)
+model_file = st.sidebar.file_uploader("Model (.pth)", type=["pth", "pt"])
+classes_file = st.sidebar.file_uploader("Classes (.txt)", type=["txt"])
+img_size = st.sidebar.number_input("Image Size", 128, 512, 224, 32)
+
+st.sidebar.divider()
+st.sidebar.subheader("Grad-CAM Sensitivity")
+
+cam_threshold = st.sidebar.slider(
+    "Activation Threshold",
+    min_value=0.2,
+    max_value=0.6,
+    value=0.35,
+    step=0.05
+)
 
 # ============================
 # Auto Load Model
@@ -155,7 +169,7 @@ if model_file and classes_file and not st.session_state.model_loaded:
     st.session_state.model_loaded = True
 
 # ============================
-# Main Area
+# Main UI
 # ============================
 uploaded_image = st.file_uploader(
     "Upload Brain MRI Image",
@@ -185,29 +199,30 @@ if uploaded_image and st.session_state.model_loaded:
     )
 
     img_np = np.array(image.resize((img_size, img_size)))
-    cam_img = overlay_cam(img_np, cam)
+    cam_img = overlay_cam(img_np, cam, cam_threshold)
 
     # ============================
     # Layout
     # ============================
-    col1, col2 = st.columns([1, 1.2])
+    col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("Input MRI")
+        st.subheader("Original MRI")
         st.image(image, use_container_width=True)
 
     with col2:
-        st.subheader("Prediction Result")
-        st.markdown(f"### **{pred_class}**")
-        st.progress(float(confidence))
-        st.caption(f"Confidence: {confidence * 100:.2f}%")
-
-        df = pd.DataFrame({
-            "Class": [st.session_state.class_names[i] for i in top5_idx],
-            "Probability (%)": [f"{probs_np[i] * 100:.2f}" for i in top5_idx]
-        })
-        st.table(df)
+        st.subheader("Grad-CAM Localization")
+        st.image(cam_img, use_container_width=True)
 
     st.divider()
-    st.subheader("Tumor Localization (Grad-CAM)")
-    st.image(cam_img, use_container_width=True)
+
+    st.subheader("Prediction Results")
+    st.markdown(f"### **{pred_class}**")
+    st.progress(float(confidence))
+    st.caption(f"Confidence: {confidence * 100:.2f}%")
+
+    df = pd.DataFrame({
+        "Class": [st.session_state.class_names[i] for i in top5_idx],
+        "Probability (%)": [f"{probs_np[i] * 100:.2f}" for i in top5_idx]
+    })
+    st.table(df)
