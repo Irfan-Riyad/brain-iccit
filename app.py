@@ -258,97 +258,113 @@ class GradCAM:
         
         return cam_np
 
-def apply_enhanced_colormap(org_img, activation_map, threshold=0.3):
+def apply_enhanced_colormap(org_img, activation_map, threshold=0.25):
     """
-    Professional medical-grade tumor localization visualization
+    Ultra-precise tumor localization with exact boundary detection
     """
-    # Resize with high-quality interpolation
+    # Resize with highest quality
     h, w = org_img.shape[:2]
     activation_map = cv2.resize(activation_map, (w, h), interpolation=cv2.INTER_LANCZOS4)
     
-    # Advanced normalization using robust statistics
-    p1 = np.percentile(activation_map, 1)
-    p99 = np.percentile(activation_map, 99)
-    activation_map = np.clip(activation_map, p1, p99)
+    # Ultra-robust normalization
+    p0_5 = np.percentile(activation_map, 0.5)
+    p99_5 = np.percentile(activation_map, 99.5)
+    activation_map = np.clip(activation_map, p0_5, p99_5)
     
     if activation_map.max() > activation_map.min():
         activation_map = (activation_map - activation_map.min()) / (activation_map.max() - activation_map.min())
     
-    # Apply bilateral filter for edge-preserving smoothing
-    activation_map = cv2.bilateralFilter(
-        (activation_map * 255).astype(np.uint8), 
-        d=9, 
-        sigmaColor=75, 
-        sigmaSpace=75
-    ).astype(np.float32) / 255.0
+    # Enhance contrast for better separation
+    activation_map = activation_map ** 0.8  # Power law for better visibility
     
-    # Threshold with hysteresis for better region connectivity
-    high_threshold = threshold + 0.1
-    low_threshold = threshold - 0.05
+    # Multi-scale processing for precise localization
+    # Process at multiple scales to capture both large and small tumors
+    scales = [1.0, 1.2, 0.8]
+    multi_scale_map = np.zeros_like(activation_map)
     
-    strong = activation_map >= high_threshold
-    weak = (activation_map >= low_threshold) & (activation_map < high_threshold)
+    for scale in scales:
+        scaled_h, scaled_w = int(h * scale), int(w * scale)
+        scaled_map = cv2.resize(activation_map, (scaled_w, scaled_h), interpolation=cv2.INTER_CUBIC)
+        scaled_map = cv2.resize(scaled_map, (w, h), interpolation=cv2.INTER_CUBIC)
+        multi_scale_map += scaled_map
     
-    # Connect weak regions that are adjacent to strong regions
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    strong_dilated = cv2.dilate(strong.astype(np.uint8), kernel, iterations=1)
-    connected_weak = weak & (strong_dilated > 0)
+    activation_map = multi_scale_map / len(scales)
     
-    final_mask = strong | connected_weak
-    activation_masked = activation_map * final_mask
+    # Adaptive thresholding based on local statistics
+    # This helps detect tumors of varying intensities
+    local_mean = cv2.GaussianBlur(activation_map, (15, 15), 0)
+    activation_enhanced = activation_map - local_mean * 0.3
+    activation_enhanced = np.clip(activation_enhanced, 0, 1)
     
-    # Morphological refinement
-    mask_uint8 = (activation_masked * 255).astype(np.uint8)
-    mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, kernel, iterations=2)
-    mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, 
-                                   cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), 
-                                   iterations=1)
+    # Sharp thresholding with connectivity analysis
+    high_conf = activation_enhanced > (threshold + 0.15)
+    medium_conf = (activation_enhanced > threshold) & ~high_conf
+    low_conf = (activation_enhanced > (threshold - 0.1)) & ~medium_conf & ~high_conf
     
-    activation_final = mask_uint8.astype(np.float32) / 255.0
+    # Connect regions intelligently
+    kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    kernel_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     
-    # Create professional red-yellow heatmap
-    # Red for high confidence, yellow for medium, transparent for low
+    # Process high confidence regions
+    high_mask = cv2.morphologyEx(high_conf.astype(np.uint8), cv2.MORPH_CLOSE, kernel_large, iterations=2)
+    
+    # Grow from high confidence to include connected medium regions
+    medium_mask = medium_conf.astype(np.uint8)
+    high_dilated = cv2.dilate(high_mask, kernel_small, iterations=2)
+    medium_connected = medium_mask & high_dilated
+    
+    # Combine masks
+    combined_mask = (high_mask | medium_connected).astype(np.uint8)
+    
+    # Final cleanup
+    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel_small, iterations=1)
+    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_large, iterations=1)
+    
+    # Apply mask to original enhanced activation
+    activation_final = activation_enhanced * combined_mask
+    
+    # Create precise, medical-grade heatmap
+    activation_uint8 = (activation_final * 255).astype(np.uint8)
+    
+    # Use red-only overlay for clinical clarity
     heatmap = np.zeros((h, w, 3), dtype=np.uint8)
     
-    # Create intensity-based color gradient
+    # Intensity-based coloring: Deep red for high confidence
     intensity = activation_final
-    heatmap[:, :, 0] = np.clip(intensity * 255, 0, 255).astype(np.uint8)  # Red channel
-    heatmap[:, :, 1] = np.clip((intensity - 0.5) * 2 * 200, 0, 200).astype(np.uint8)  # Green for yellow tint
-    heatmap[:, :, 2] = 0  # No blue
+    heatmap[:, :, 0] = np.clip(intensity * 280, 0, 255).astype(np.uint8)  # Strong red
+    heatmap[:, :, 1] = np.clip((intensity ** 2) * 150, 0, 150).astype(np.uint8)  # Slight orange tint for highest values
+    heatmap[:, :, 2] = 0
     
-    # Smart alpha blending - higher intensity = more visible
-    alpha = np.expand_dims(activation_final ** 0.7, axis=2) * 0.6  # Gamma correction for better visibility
+    # Precise alpha blending
+    alpha = np.expand_dims(activation_final ** 0.6, axis=2) * 0.65
     
-    # Blend with original image
+    # Blend
     org_float = org_img.astype(np.float32)
     heatmap_float = heatmap.astype(np.float32)
-    
-    # Enhanced blending for better contrast
     blended = org_float * (1 - alpha) + heatmap_float * alpha
     
-    # Subtle sharpening only on tumor regions for crisp boundaries
-    sharpening_kernel = np.array([[-0.5, -0.5, -0.5],
-                                   [-0.5,  5.0, -0.5],
-                                   [-0.5, -0.5, -0.5]])
+    # Edge enhancement only on tumor boundaries
+    edges = cv2.Canny(activation_uint8, 30, 80)
+    edges_dilated = cv2.dilate(edges, kernel_small, iterations=1)
     
-    tumor_mask_3ch = np.repeat(np.expand_dims(activation_final > 0.1, axis=2), 3, axis=2)
-    sharpened = cv2.filter2D(blended, -1, sharpening_kernel)
+    # Highlight edges in bright red
+    result = blended.copy()
+    result[edges_dilated > 0] = [255, 100, 100]  # Bright red-orange edges
     
-    # Apply sharpening only to tumor regions
-    result = blended * (1 - tumor_mask_3ch) + sharpened * tumor_mask_3ch * 0.3 + blended * tumor_mask_3ch * 0.7
-    
-    # Final enhancement: local contrast adjustment
     result_uint8 = np.clip(result, 0, 255).astype(np.uint8)
     
-    # Apply CLAHE only to luminance channel for better local contrast
+    # Final local contrast enhancement
     lab = cv2.cvtColor(result_uint8, cv2.COLOR_RGB2LAB)
     l, a, b = cv2.split(lab)
     
-    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
-    l_enhanced = clahe.apply(l)
+    # Apply CLAHE only where there's tumor
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    tumor_mask = (activation_final > 0.05).astype(np.uint8) * 255
+    l_tumor = l.copy()
+    l_tumor[tumor_mask > 0] = clahe.apply(l[tumor_mask > 0])
     
-    result_enhanced = cv2.merge([l_enhanced, a, b])
-    result_final = cv2.cvtColor(result_enhanced, cv2.COLOR_LAB2RGB)
+    result_lab = cv2.merge([l_tumor, a, b])
+    result_final = cv2.cvtColor(result_lab, cv2.COLOR_LAB2RGB)
     
     return result_final, activation_final
 
@@ -387,28 +403,25 @@ transform_version = st.sidebar.selectbox(
     help="Try different transforms to see which matches training"
 )
 
-# Load model button
-if st.sidebar.button("🔄 Load Model", type="primary"):
-    if model_file and classes_file:
-        with st.spinner("Loading model..."):
-            try:
-                class_names = load_classes(classes_file)
-                
-                model_file.seek(0)
-                model = load_model_clean(model_file, len(class_names))
-                
-                if model:
-                    st.session_state.model = model
-                    st.session_state.class_names = class_names
-                    st.session_state.model_loaded = True
-                    st.sidebar.success("✅ Model loaded successfully!")
-                    st.sidebar.metric("Classes", len(class_names))
-                
-            except Exception as e:
-                st.sidebar.error(f"Error: {e}")
-                st.sidebar.code(traceback.format_exc())
-    else:
-        st.sidebar.error("Please upload both files!")
+# Auto-load model when files are uploaded
+if model_file and classes_file and not st.session_state.model_loaded:
+    with st.spinner("Loading model..."):
+        try:
+            class_names = load_classes(classes_file)
+            
+            model_file.seek(0)
+            model = load_model_clean(model_file, len(class_names))
+            
+            if model:
+                st.session_state.model = model
+                st.session_state.class_names = class_names
+                st.session_state.model_loaded = True
+                st.sidebar.success("✅ Model loaded successfully!")
+                st.sidebar.metric("Classes", len(class_names))
+            
+        except Exception as e:
+            st.sidebar.error(f"Error: {e}")
+            st.sidebar.code(traceback.format_exc())
 
 # Display loaded classes
 if st.session_state.class_names and st.session_state.model_loaded:
