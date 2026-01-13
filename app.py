@@ -359,11 +359,13 @@ def apply_enhanced_colormap(org_img, activation_map, threshold=0.25):
     
     # Apply CLAHE only where there's tumor
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    tumor_mask = (activation_final > 0.05).astype(np.uint8) * 255
-    l_tumor = l.copy()
-    l_tumor[tumor_mask > 0] = clahe.apply(l[tumor_mask > 0])
+    tumor_mask = (activation_final > 0.05).astype(np.uint8)
     
-    result_lab = cv2.merge([l_tumor, a, b])
+    # Apply CLAHE to entire L channel, then blend based on mask
+    l_enhanced = clahe.apply(l)
+    l_final = l * (1 - tumor_mask) + l_enhanced * tumor_mask
+    
+    result_lab = cv2.merge([l_final.astype(np.uint8), a, b])
     result_final = cv2.cvtColor(result_lab, cv2.COLOR_LAB2RGB)
     
     return result_final, activation_final
@@ -546,8 +548,8 @@ if st.session_state.last_prediction:
             predicted_idx = st.session_state.last_prediction['predicted_idx']
             image = st.session_state.last_prediction['image']
             
-            # Default optimal threshold
-            threshold = 0.30
+            # Default optimal threshold - lowered for better detection
+            threshold = 0.25
             
             with st.spinner("Generating tumor localization..."):
                 # Convert original image to numpy
