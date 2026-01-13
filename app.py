@@ -513,48 +513,35 @@ with col2:
         st.info("👆 Upload an image to get started")
 
 # ----------------------------
-# Grad-CAM Section (Separate, Below Main Content)
+# Grad-CAM Section (Automatic, Below Main Content)
 # ----------------------------
 if st.session_state.last_prediction:
-    st.divider()
-    st.header("🔥 Grad-CAM: Tumor Localization Analysis")
-    st.markdown("**Visualize which regions influenced the model's prediction**")
+    # Check if predicted class indicates a tumor (not "normal" or "no tumor")
+    predicted_class = st.session_state.last_prediction['display_classes'][st.session_state.last_prediction['predicted_idx']]
     
-    # Layer selection with radio button for single selection
-    col_config1, col_config2 = st.columns(2)
+    # Check if it's a tumor case (not normal/healthy)
+    is_tumor = not any(keyword in predicted_class.lower() for keyword in ['normal', 'notumor', 'no tumor', 'healthy', '_normal'])
     
-    with col_config1:
-        selected_layer = st.radio(
-            "Select Layer to Visualize",
-            ["HybridCNN (Fusion)"],
-            index=0,
-            help="Visualize combined ResNet50 + DenseNet121 features"
-        )
-    
-    with col_config2:
-        threshold = st.slider(
-            "Sensitivity",
-            min_value=0.15,
-            max_value=0.55,
-            value=0.30,
-            step=0.05,
-            help="Lower: More regions detected | Higher: Only strong detections"
-        )
-    
-    # Generate button
-    if st.button("🔍 Generate Grad-CAM", type="primary", use_container_width=True):
-        with st.spinner(f"Generating Grad-CAM for {selected_layer}..."):
-            try:
-                # Get data from session
-                input_tensor = st.session_state.last_prediction['input_tensor']
-                predicted_idx = st.session_state.last_prediction['predicted_idx']
-                image = st.session_state.last_prediction['image']
-                
+    if is_tumor:
+        st.divider()
+        st.header("🔥 Tumor Localization Analysis")
+        
+        # Automatic Grad-CAM generation
+        try:
+            # Get data from session
+            input_tensor = st.session_state.last_prediction['input_tensor']
+            predicted_idx = st.session_state.last_prediction['predicted_idx']
+            image = st.session_state.last_prediction['image']
+            
+            # Default optimal threshold
+            threshold = 0.30
+            
+            with st.spinner("Generating tumor localization..."):
                 # Convert original image to numpy
                 org_img = np.array(image.resize((img_size, img_size)))
                 
-                # Define target layer - HybridCNN Fusion only
-                target_layer = st.session_state.model.resnet.layer4[-1].conv3  # Combined features visualization
+                # Define target layer
+                target_layer = st.session_state.model.resnet.layer4[-1].conv3
                 
                 # Generate Grad-CAM
                 gradcam = GradCAM(st.session_state.model, target_layer)
@@ -568,42 +555,34 @@ if st.session_state.last_prediction:
                 
                 # Region detection
                 cam_binary = (cam_thresholded > 0.1).astype(np.uint8)
-                num_regions, labeled_regions, stats, _ = cv2.connectedComponentsWithStats(cam_binary, connectivity=8)
+                num_regions, _, stats, _ = cv2.connectedComponentsWithStats(cam_binary, connectivity=8)
                 
                 # Filter significant regions (>1% of image)
                 min_size = (cam_binary.shape[0] * cam_binary.shape[1]) * 0.01
                 significant_regions = sum(1 for i in range(1, num_regions) if stats[i, cv2.CC_STAT_AREA] > min_size)
                 
-                # Display results with better layout
-                st.subheader(f"📍 Tumor Localization Results")
-                
-                # Two column display with better spacing
+                # Display results
                 vis_col1, vis_col2 = st.columns(2, gap="medium")
                 
                 with vis_col1:
                     st.image(org_img, caption="Original MRI Scan", use_container_width=True)
                 
                 with vis_col2:
-                    st.image(gradcam_img, caption="AI Tumor Detection", use_container_width=True)
+                    st.image(gradcam_img, caption="Tumor Localization", use_container_width=True)
                 
-                # Clean minimal display with professional styling
+                # Status
                 st.divider()
-                
-                # Status with color coding
                 if significant_regions == 0:
-                    st.warning("⚠️ No significant tumor regions detected at current sensitivity")
+                    st.info("ℹ️ Low confidence tumor localization")
                 elif significant_regions == 1:
-                    st.success("✓ **Single tumor region identified**")
-                    st.info(f"📊 Coverage: {tumor_coverage:.1f}% of scan area")
+                    st.success(f"✓ Single tumor region identified | Coverage: {tumor_coverage:.1f}%")
                 else:
-                    st.success(f"✓ **{significant_regions} distinct tumor regions identified**")
-                    st.info(f"📊 Total coverage: {tumor_coverage:.1f}% of scan area")
+                    st.success(f"✓ {significant_regions} tumor regions identified | Coverage: {tumor_coverage:.1f}%")
                 
-                st.caption("🔴 Red-to-yellow gradient: Tumor confidence (Red = High, Yellow = Medium)")
+                st.caption("🔴 Red-to-yellow overlay shows tumor location confidence")
                 
-            except Exception as e:
-                st.error(f"Error generating Grad-CAM: {str(e)}")
-                st.code(traceback.format_exc())
+        except Exception as e:
+            st.error(f"Error generating localization: {str(e)}")
 
 # ----------------------------
 # Footer (Removed)
